@@ -16,7 +16,7 @@ Order-by-order profit and loss in one place: revenue after tax, COGS, pick & pac
 
 ## Seeing it
 
-Open `index.html` through a local web server and choose **Open the demo with sample data**. The demo makes its numbers in the browser and reads nothing from the database.
+Open https://sofia-spiritz.github.io/pl-planner/ (hosted on GitHub Pages from the `main` branch) and choose **Open the demo with sample data**. The demo makes its numbers in the browser and reads nothing from the database.
 
 ## Connecting the database (one-off)
 
@@ -45,4 +45,3 @@ Then sign in on the page with that email and password. Only signed-in users on t
 - The FIFO engine for landed cost per unit (COGS is currently a stored figure per order line).
 - Reconciliation against payouts and the bank; the bridge to Lifetimely and Profitably.
 - Export to PowerPoint or a spreadsheet.
-- Hosting. The page only runs locally for now.
