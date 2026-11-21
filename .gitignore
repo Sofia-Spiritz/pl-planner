@@ -7,6 +7,9 @@ node_modules/
 dist/
 .next/
 
+# Local preview settings for Claude
+.claude/
+
 # OS and editor files
 .DS_Store
 Thumbs.db
