@@ -10,7 +10,8 @@
 -- Every cost on an order line carries a source: 'actual' (from an invoice or payout)
 -- or 'estimate' (from a rate card or model). The dashboard shows the split.
 --
--- Security: row level security is on for every table. Only signed-in users can read.
+-- Security: row level security is on for every table. Only signed-in users whose email
+-- is listed in dashboard_users can read.
 -- Nobody can write from the web page; data is loaded from the SQL editor or a server job.
 
 create table if not exists public.markets (
@@ -87,7 +88,32 @@ create table if not exists public.opex_monthly (
   primary key (month, category)
 );
 
--- Row level security: signed-in users can read, nobody can write from the browser.
+-- Who may see the dashboard. Signing in is not enough: the email must also be on this list.
+-- This matters because the page is public, so anyone could try to create an account.
+-- Add a person from the SQL editor:  insert into public.dashboard_users (email) values ('name@example.com');
+create table if not exists public.dashboard_users (
+  email    text primary key,
+  added_at timestamptz not null default now()
+);
+alter table public.dashboard_users enable row level security;   -- no policies: not readable from the web page
+revoke all on public.dashboard_users from anon, authenticated;
+
+create or replace function public.is_dashboard_user()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from public.dashboard_users u
+    where lower(u.email) = lower(coalesce(auth.jwt() ->> 'email', ''))
+  );
+$$;
+revoke all on function public.is_dashboard_user() from public, anon;
+grant execute on function public.is_dashboard_user() to authenticated;
+
+-- Row level security: listed, signed-in users can read; nobody can write from the browser.
 do $$
 declare t text;
 begin
@@ -95,7 +121,7 @@ begin
   loop
     execute format('alter table public.%I enable row level security', t);
     execute format('drop policy if exists "signed-in read" on public.%I', t);
-    execute format('create policy "signed-in read" on public.%I for select to authenticated using (true)', t);
+    execute format('create policy "signed-in read" on public.%I for select to authenticated using (public.is_dashboard_user())', t);
     execute format('revoke all on public.%I from anon', t);
     execute format('grant select on public.%I to authenticated', t);
   end loop;

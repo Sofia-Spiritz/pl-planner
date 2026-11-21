@@ -25,8 +25,10 @@ In the **Sofia & Spiritz** Supabase project:
 1. SQL editor: paste and run `sql/001_schema.sql`.
 2. SQL editor: paste and run `sql/002_sample_data.sql`.
 3. Authentication > Users > Add user: create a sign-in for each person who should see the dashboard.
+4. SQL editor: add the same email to the allowed list, `insert into public.dashboard_users (email) values ('name@example.com');`
+5. Authentication > Sign In / Providers: turn off "Allow new users to sign up".
 
-Then sign in on the page with that email and password. Only signed-in users can read the data, and nobody can change data from the web page.
+Then sign in on the page with that email and password. Only signed-in users on the allowed list can read the data, and nobody can change data from the web page.
 
 ## How the numbers are defined
 
