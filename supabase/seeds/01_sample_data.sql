@@ -1,5 +1,5 @@
 -- P&L Planner: SAMPLE DATA ONLY. None of these numbers are real.
--- Run after 001_schema.sql in the Sofia & Spiritz project's SQL editor.
+-- Loaded by: npx supabase db push --remote --include-seed (or paste into the SQL editor).
 -- Makes about 180 days of invented orders so the dashboard has something to show.
 -- Every sample row is marked is_sample = true; 003_clear_sample_data.sql removes them all.
 -- Safe to re-run: it replaces the earlier sample rows.
@@ -59,7 +59,8 @@ with days as (
   select d, n from days cross join lateral generate_series(1, cnt) n
 ), r as (
   select row_number() over (order by d, n) as rn, d,
-         random() as r_m, random() as r_c, random() as r_l, random() as r_s, random() as r_g
+         random()::numeric as r_m, random()::numeric as r_c, random()::numeric as r_l,
+         random()::numeric as r_s, random()::numeric as r_g
   from o
 ), m as (
   select *,
@@ -85,7 +86,7 @@ insert into public.order_lines
    pick_pack, pick_pack_src, shipping, shipping_src, payment_fee, payment_fee_src)
 with l as materialized (
   select o.*, k as line_no,
-         random() as r_sku, random() as r_q, random() as r_d, random() as r_cost
+         random()::numeric as r_sku, random()::numeric as r_q, random()::numeric as r_d, random()::numeric as r_cost
   from _o o cross join lateral generate_series(1, o.nlines) k
 ), s as (
   select *, row_number() over (order by sku) as rn, count(*) over () as cnt

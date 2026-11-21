@@ -7,6 +7,9 @@ node_modules/
 dist/
 .next/
 
+# Allowed-user list (email addresses)
+supabase/seeds/00_private_users.sql
+
 # Local preview settings for Claude
 .claude/
 
