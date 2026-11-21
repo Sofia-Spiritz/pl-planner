@@ -1,10 +1,12 @@
 /* P&L Planner dashboard.
-   One page, hash-routed tabs. Reads from Supabase when signed in (sql/001_schema.sql),
+   One page, hash-routed tabs. Reads from Supabase when signed in (supabase/migrations),
    or from invented in-browser numbers in demo mode. Both go through the same three calls:
      provider.data(from, to)   -> { facts, orders, marketing, opex, meta }
      provider.orders(filter)   -> { rows, count }
      provider.lines(orderId)   -> [ line, ... ]
-   All percentages are of net revenue (revenue after tax). */
+   All percentages are of net revenue (revenue after tax).
+   Filters (market, 3PL, collection) apply to every tab. Marketing is recorded by market only and
+   OPEX by month only, so under a 3PL or collection filter they are shared out by net revenue. */
 (function () {
 'use strict';
 
@@ -32,6 +34,7 @@ function money2(n) {
 }
 function num(n) { return Math.round(n).toLocaleString('en-GB'); }
 function pct(a, b) { return b ? (a / b * 100).toFixed(1) + '%' : '–'; }
+function ratio(a, b) { return b ? a / b : 0; }
 function fmtDay(s, withYear) {
   var o = { day: 'numeric', month: 'short', timeZone: 'UTC' };
   if (withYear) o.year = 'numeric';
@@ -53,11 +56,15 @@ var PRESETS = [
   ['week', 'This week'], ['4w', 'Last 4 weeks'], ['month', 'This month'],
   ['lastmonth', 'Last month'], ['90d', 'Last 90 days'], ['ytd', 'Year to date']
 ];
+var ORDER_SORTS = { order_date: 1, units: 1, net_revenue: 1, cogs: 1, pick_pack: 1, shipping: 1, payment_fee: 1, gross_profit: 1 };
 
 var state = {
   tab: 'overview', preset: '4w', from: '', to: '', gran: 'day',
-  data: null, hidden: {}, who: '', mode: '',
-  ord: { page: 0, market: '', threepl: '', q: '', open: null, rows: [], count: 0, lines: {}, loading: false }
+  f: { m: '', t: '', c: '' },          // filters: market, 3PL, collection
+  stack: [],                           // earlier date ranges, for the Back button
+  sort: {},                            // table sorts, by table key
+  data: null, hidden: {}, charts: {}, who: '', mode: '',
+  ord: { page: 0, q: '', sort: 'order_date', dir: 'desc', open: null, rows: [], count: 0, lines: {}, loading: false }
 };
 var sb = null, provider = null;
 
@@ -185,8 +192,10 @@ function demoProvider() {
       var rows = orders.filter(function (o) {
         return o.d >= q.from && o.d <= q.to && (!q.market || o.m === q.market) && (!q.threepl || o.t === q.threepl) &&
                (!q.q || o.name.toLowerCase().indexOf(q.q.toLowerCase()) >= 0);
-      }).reverse();
-      return Promise.resolve({ count: rows.length, rows: rows.slice(q.page * PAGE, q.page * PAGE + PAGE).map(orderRow) });
+      }).map(orderRow);
+      var dir = q.dir === 'asc' ? 1 : -1, col = q.sort;
+      rows.sort(function (a, b) { return (a[col] < b[col] ? -1 : a[col] > b[col] ? 1 : a.order_id - b.order_id) * dir; });
+      return Promise.resolve({ count: rows.length, rows: rows.slice(q.page * PAGE, q.page * PAGE + PAGE) });
     },
     lines: function (id) {
       var o = orders.filter(function (x) { return x.id === id; })[0];
@@ -205,7 +214,7 @@ function sbProvider() {
     orders: function (q) {
       var x = sb.from('order_pl').select('*', { count: 'exact' })
         .gte('order_date', q.from).lte('order_date', q.to)
-        .order('order_date', { ascending: false }).order('order_id', { ascending: false })
+        .order(q.sort, { ascending: q.dir === 'asc' }).order('order_id', { ascending: false })
         .range(q.page * PAGE, q.page * PAGE + PAGE - 1);
       if (q.market) x = x.eq('market', q.market);
       if (q.threepl) x = x.ilike('threepls', '%' + q.threepl + '%');
@@ -223,6 +232,12 @@ function sbProvider() {
 var ZERO = ['o', 'u', 'rev', 'tax', 'cogs', 'cogs_e', 'pp', 'pp_e', 'ship', 'ship_e', 'fee', 'fee_e'];
 function blank() { var z = {}; ZERO.forEach(function (k) { z[k] = 0; }); return z; }
 function addFact(z, r) { ZERO.forEach(function (k) { z[k] += +r[k] || 0; }); }
+
+/* Filter tests. `skip` leaves one filter out, so a "by market" table still lists every market. */
+function okM(r, skip) { return skip === 'm' || !state.f.m || r.m === state.f.m; }
+function okT(r, skip) { return skip === 't' || !state.f.t || r.t === state.f.t; }
+function okC(r, skip) { return skip === 'c' || !state.f.c || r.c === state.f.c; }
+function anyFilter() { return !!(state.f.m || state.f.t || state.f.c); }
 
 function opexFor(from, to) {
   var total = 0, by = {};
@@ -242,12 +257,25 @@ function finish(z, orders, mkt, opex) {
   z.est = z.cogs_e + z.pp_e + z.ship_e + z.fee_e;
   return z;
 }
+/* A running tally for one slice of time, honouring the filters. */
+function tally() { return { z: blank(), orders: 0, mktM: 0, netAll: 0, netM: 0 }; }
+function tallyFact(t, r) {
+  var net = (+r.rev) - (+r.tax);
+  t.netAll += net;
+  if (okM(r)) { t.netM += net; if (okT(r) && okC(r)) addFact(t.z, r); }
+}
+function tallyDone(t, opexTotal) {
+  var f = state.f, net = t.z.rev - t.z.tax;
+  var mkt = (f.t || f.c) ? t.mktM * ratio(net, t.netM) : t.mktM;
+  var opex = anyFilter() ? opexTotal * ratio(net, t.netAll) : opexTotal;
+  return finish(t.z, f.c ? t.z.o : t.orders, mkt, opex);
+}
 function period(from, to) {
-  var z = blank(), orders = 0, mkt = 0;
-  state.data.facts.forEach(function (r) { if (r.d >= from && r.d <= to) addFact(z, r); });
-  state.data.orders.forEach(function (r) { if (r.d >= from && r.d <= to) orders += +r.o; });
-  state.data.marketing.forEach(function (r) { if (r.d >= from && r.d <= to) mkt += +r.s; });
-  return finish(z, orders, mkt, opexFor(from, to).total);
+  var t = tally();
+  state.data.facts.forEach(function (r) { if (r.d >= from && r.d <= to) tallyFact(t, r); });
+  state.data.orders.forEach(function (r) { if (r.d >= from && r.d <= to && okM(r) && okT(r)) t.orders += +r.o; });
+  state.data.marketing.forEach(function (r) { if (r.d >= from && r.d <= to && okM(r)) t.mktM += +r.s; });
+  return tallyDone(t, opexFor(from, to).total);
 }
 function prevRange() {
   var len = daysBetween(state.from, state.to), pto = addDays(state.from, -1);
@@ -255,23 +283,30 @@ function prevRange() {
 }
 /* Groups the current period by market (m), 3PL (t) or collection (c). */
 function byDim(key) {
-  var g = {}, ord = {}, mk = {}, from = state.from, to = state.to, totalNet = 0, totalMkt = 0;
+  var g = {}, ord = {}, mk = {}, base = {}, mktM = 0, netM = 0, from = state.from, to = state.to, f = state.f;
   state.data.facts.forEach(function (r) {
-    if (r.d < from || r.d > to) return;
-    addFact(g[r[key]] = g[r[key]] || blank(), r);
-    if (key === 'c') ord[r.c] = (ord[r.c] || 0) + (+r.o);
-    totalNet += (+r.rev) - (+r.tax);
+    if (r.d < from || r.d > to || !okM(r, key)) return;
+    var net = (+r.rev) - (+r.tax);
+    netM += net; base[r.m] = (base[r.m] || 0) + net;
+    if (okT(r, key) && okC(r, key)) addFact(g[r[key]] = g[r[key]] || blank(), r);
   });
-  if (key !== 'c') state.data.orders.forEach(function (r) { if (r.d >= from && r.d <= to) ord[r[key]] = (ord[r[key]] || 0) + (+r.o); });
+  state.data.orders.forEach(function (r) {
+    if (r.d >= from && r.d <= to && okM(r, key) && okT(r, key)) ord[r[key]] = (ord[r[key]] || 0) + (+r.o);
+  });
   state.data.marketing.forEach(function (r) {
-    if (r.d < from || r.d > to) return;
-    totalMkt += +r.s; mk[r.m] = (mk[r.m] || 0) + (+r.s);
+    if (r.d < from || r.d > to || !okM(r, key)) return;
+    mktM += +r.s; mk[r.m] = (mk[r.m] || 0) + (+r.s);
   });
   return Object.keys(g).map(function (name) {
     var z = g[name], net = z.rev - z.tax;
-    var mkt = key === 'm' ? (mk[name] || 0) : (totalNet ? totalMkt * net / totalNet : 0);
-    z = finish(z, ord[name] || 0, mkt, 0); z.name = name; return z;
-  }).sort(function (a, b) { return b.net - a.net; });
+    var mkt = key === 'm' ? (mk[name] || 0) * ratio(net, base[name]) : mktM * ratio(net, netM);
+    z = finish(z, (key === 'c' || f.c) ? z.o : (ord[name] || 0), mkt, 0); z.name = name; return z;
+  });
+}
+function sumRows(rows) {
+  var z = blank(), orders = 0, mkt = 0;
+  rows.forEach(function (r) { addFact(z, r); orders += r.orders; mkt += r.mkt; });
+  return finish(z, orders, mkt, 0);
 }
 function bucketOf(d) {
   if (state.gran === 'month') return d.slice(0, 7) + '-01';
@@ -282,21 +317,28 @@ function series() {
   var keys = [], map = {}, d;
   for (d = state.from; d <= state.to; d = addDays(d, 1)) {
     var b = bucketOf(d);
-    if (!map[b]) { map[b] = { key: b, first: d, last: d, z: blank(), mkt: 0, orders: 0 }; keys.push(b); }
+    if (!map[b]) { map[b] = tally(); map[b].first = d; keys.push(b); }
     map[b].last = d;
   }
-  state.data.facts.forEach(function (r) { if (r.d >= state.from && r.d <= state.to) addFact(map[bucketOf(r.d)].z, r); });
-  state.data.orders.forEach(function (r) { if (r.d >= state.from && r.d <= state.to) map[bucketOf(r.d)].orders += +r.o; });
-  state.data.marketing.forEach(function (r) { if (r.d >= state.from && r.d <= state.to) map[bucketOf(r.d)].mkt += +r.s; });
+  state.data.facts.forEach(function (r) { if (r.d >= state.from && r.d <= state.to) tallyFact(map[bucketOf(r.d)], r); });
+  state.data.orders.forEach(function (r) { if (r.d >= state.from && r.d <= state.to && okM(r) && okT(r)) map[bucketOf(r.d)].orders += +r.o; });
+  state.data.marketing.forEach(function (r) { if (r.d >= state.from && r.d <= state.to && okM(r)) map[bucketOf(r.d)].mktM += +r.s; });
   return keys.map(function (k) {
-    var x = map[k], z = finish(x.z, x.orders, x.mkt, opexFor(x.first, x.last).total);
+    var x = map[k], z = tallyDone(x, opexFor(x.first, x.last).total);
+    z.first = x.first; z.last = x.last;
     z.label = state.gran === 'month' ? new Date(ms(k)).toLocaleDateString('en-GB', { month: 'short', year: '2-digit', timeZone: 'UTC' }) : fmtDay(k);
-    z.key = k; return z;
+    z.tip = state.gran === 'day' ? fmtDay(k, true) : state.gran === 'week' ? fmtDay(x.first) + ' to ' + fmtDay(x.last, true) : z.label;
+    return z;
   });
 }
 function nameOf(list, code) {
   var hit = (state.data.meta[list] || []).filter(function (x) { return x.code === code; })[0];
   return hit ? hit.name : code;
+}
+function collections() {
+  var seen = {};
+  state.data.facts.forEach(function (r) { seen[r.c] = 1; });
+  return Object.keys(seen).sort();
 }
 
 /* ---------- small render pieces ---------- */
@@ -306,25 +348,32 @@ function delta(cur, prev, neutral) {
   var cls = neutral ? 'muted' : (ch >= 0 ? 'up' : 'down');
   return '<span class="' + cls + '">' + (ch >= 0 ? '▲ ' : '▼ ') + Math.abs(ch).toFixed(1) + '%</span> <span class="muted">vs previous</span>';
 }
-function kpi(label, value, sub) {
-  return '<div class="kpi"><div class="k">' + esc(label) + '</div><div class="v">' + value + '</div><div class="s">' + sub + '</div></div>';
+function kpi(label, value, sub, go) {
+  return '<div class="kpi' + (go ? ' go' : '') + '"' + (go ? ' data-go="' + go + '" tabindex="0" role="link"' : '') + '><div class="k">' + esc(label) +
+         '</div><div class="v">' + value + '</div><div class="s">' + sub + '</div></div>';
 }
-function hbar(label, parts, total, valueText) {
+function hbar(label, parts, total, valueText, attrs) {
   var fills = parts.map(function (p) {
     return '<span class="fill" style="width:' + (total ? Math.max(0, p[0]) / total * 100 : 0).toFixed(2) + '%;background:' + cssVar(p[1]) + '"></span>';
   }).join('');
-  return '<div class="hbar"><span>' + esc(label) + '</span><span class="track">' + fills + '</span><span class="val">' + valueText + '</span></div>';
+  return '<div class="hbar' + (attrs ? ' pick' : '') + '"' + (attrs || '') + '><span>' + esc(label) + '</span><span class="track">' + fills + '</span><span class="val">' + valueText + '</span></div>';
 }
 function granPicker() {
   return '<div class="seg">' + [['day', 'Day'], ['week', 'Week'], ['month', 'Month']].map(function (g) {
     return '<button type="button" data-gran="' + g[0] + '" class="' + (state.gran === g[0] ? 'on' : '') + '">' + g[1] + '</button>';
   }).join('') + '</div>';
 }
+function sortHead(table, col, label, cls) {
+  var s = state.sort[table] || {}, on = s.col === col;
+  return '<th class="sortable' + (cls ? ' ' + cls : '') + '" data-sort="' + table + '|' + col + '" tabindex="0" aria-sort="' + (on ? (s.dir > 0 ? 'ascending' : 'descending') : 'none') + '">' +
+         label + (on ? (s.dir > 0 ? ' ▲' : ' ▼') : '') + '</th>';
+}
 
-/* Bars + lines chart in SVG with a clickable legend. */
-function drawChart(hostId, labels, list, fmt) {
+/* Bars + lines chart in SVG: clickable legend, hover read-out, click a bar to zoom in. */
+function drawChart(hostId, buckets, list, fmt) {
   var host = $(hostId); if (!host) return;
   var hid = state.hidden[hostId] = state.hidden[hostId] || {};
+  var labels = buckets.map(function (b) { return b.label; });
   var vis = list.filter(function (s) { return !hid[s.name]; });
   var W = Math.max(320, host.clientWidth), H = 260, L = 60, R = 10, T = 10, B = 24;
   var max = 0, min = 0;
@@ -343,19 +392,19 @@ function drawChart(hostId, labels, list, fmt) {
   labels.forEach(function (lb, i) {
     if (i % step === 0) out += '<text x="' + (L + i * bw + bw / 2) + '" y="' + (H - 6) + '" text-anchor="middle">' + esc(lb) + '</text>';
   });
+  out += '<rect class="hl" x="0" y="' + T + '" width="' + bw + '" height="' + (H - T - B) + '" visibility="hidden"/>';
   vis.forEach(function (s) {
     if (s.type === 'bar') {
       s.values.forEach(function (v, i) {
         var y0 = y(0), y1 = y(v);
         out += '<rect x="' + (L + i * bw + bw * .15) + '" width="' + Math.max(1, bw * .7) + '" y="' + Math.min(y0, y1) + '" height="' + Math.abs(y1 - y0) +
-               '" fill="' + cssVar(s.color) + '" opacity=".85"><title>' + esc(labels[i] + ' · ' + s.name + ': ' + fmt(v)) + '</title></rect>';
+               '" fill="' + cssVar(s.color) + '" opacity=".85"/>';
       });
     } else {
       out += '<polyline fill="none" stroke="' + cssVar(s.color) + '" stroke-width="2" points="' +
         s.values.map(function (v, i) { return (L + i * bw + bw / 2) + ',' + y(v); }).join(' ') + '"/>';
-      s.values.forEach(function (v, i) {
-        out += '<circle cx="' + (L + i * bw + bw / 2) + '" cy="' + y(v) + '" r="' + (n > 45 ? 4 : 3) + '" fill="' + cssVar(s.color) +
-               '" opacity="' + (n > 45 ? 0 : 1) + '"><title>' + esc(labels[i] + ' · ' + s.name + ': ' + fmt(v)) + '</title></circle>';
+      if (n <= 45) s.values.forEach(function (v, i) {
+        out += '<circle cx="' + (L + i * bw + bw / 2) + '" cy="' + y(v) + '" r="3" fill="' + cssVar(s.color) + '"/>';
       });
     }
   });
@@ -363,8 +412,29 @@ function drawChart(hostId, labels, list, fmt) {
     '<div class="legend">' + list.map(function (s) {
       return '<button type="button" data-chart="' + hostId + '" data-series="' + esc(s.name) + '" class="' + (hid[s.name] ? 'off' : '') +
              '" aria-pressed="' + (!hid[s.name]) + '"><i style="background:' + cssVar(s.color) + '"></i>' + esc(s.name) + '</button>';
-    }).join('') + '</div>' +
-    '<svg class="chart" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" role="img" aria-label="Chart">' + out + '</svg>';
+    }).join('') + '<span class="small muted">hover for figures, click a bar to zoom in</span></div>' +
+    '<div class="chart-wrap"><svg class="chart" data-plot="' + hostId + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" role="img" aria-label="Chart">' + out +
+    '</svg><div class="tip" hidden></div></div>';
+  state.charts[hostId] = { buckets: buckets, vis: vis, fmt: fmt, W: W, L: L, bw: bw, n: n };
+}
+function chartIndex(svg, e) {
+  var c = state.charts[svg.dataset.plot]; if (!c) return null;
+  var box = svg.getBoundingClientRect();
+  var x = (e.clientX - box.left) * c.W / box.width;
+  var i = Math.floor((x - c.L) / c.bw);
+  return (i < 0 || i >= c.n) ? null : { c: c, i: i, box: box };
+}
+function chartHover(svg, e) {
+  var hit = chartIndex(svg, e), tip = svg.parentNode.querySelector('.tip'), hl = svg.querySelector('.hl');
+  if (!hit) { tip.hidden = true; hl.setAttribute('visibility', 'hidden'); return; }
+  var c = hit.c, i = hit.i;
+  hl.setAttribute('x', c.L + i * c.bw); hl.setAttribute('visibility', 'visible');
+  tip.innerHTML = '<b>' + esc(c.buckets[i].tip) + '</b>' + c.vis.map(function (s) {
+    return '<div><i style="background:' + cssVar(s.color) + '"></i>' + esc(s.name) + '<span>' + esc(c.fmt(s.values[i])) + '</span></div>';
+  }).join('');
+  tip.hidden = false;
+  var px = (c.L + (i + .5) * c.bw) * hit.box.width / c.W;
+  tip.style.left = Math.min(Math.max(4, px + 12), hit.box.width - tip.offsetWidth - 4) + 'px';
 }
 
 /* ---------- tabs ---------- */
@@ -372,32 +442,32 @@ function renderOverview() {
   var cur = period(state.from, state.to), pr = prevRange(), prev = period(pr.from, pr.to);
   var actualShare = cur.costs ? (cur.costs - cur.est) / cur.costs : 0;
   var html = '<div class="stack"><div class="kpis">' +
-    kpi('Net revenue', money(cur.net), delta(cur.net, prev.net)) +
-    kpi('Gross profit', money(cur.gp), pct(cur.gp, cur.net) + ' margin · ' + delta(cur.gp, prev.gp)) +
-    kpi('Contribution', money(cur.con), pct(cur.con, cur.net) + ' · ' + delta(cur.con, prev.con)) +
-    kpi('Net profit', money(cur.np), pct(cur.np, cur.net) + ' · ' + delta(cur.np, prev.np)) +
-    kpi('Orders', num(cur.orders), delta(cur.orders, prev.orders)) +
-    kpi('Net revenue per order', cur.orders ? money2(cur.net / cur.orders) : '–', delta(cur.orders ? cur.net / cur.orders : 0, prev.orders ? prev.net / prev.orders : 0)) +
-    kpi('Costs on actuals', (actualShare * 100).toFixed(0) + '%', 'the rest is estimated') +
+    kpi('Net revenue', money(cur.net), delta(cur.net, prev.net), 'markets') +
+    kpi('Gross profit', money(cur.gp), pct(cur.gp, cur.net) + ' margin · ' + delta(cur.gp, prev.gp), 'costs') +
+    kpi('Contribution', money(cur.con), pct(cur.con, cur.net) + ' · ' + delta(cur.con, prev.con), 'marketing') +
+    kpi('Net profit', money(cur.np), pct(cur.np, cur.net) + ' · ' + delta(cur.np, prev.np), 'marketing') +
+    kpi('Orders', num(cur.orders), delta(cur.orders, prev.orders), 'orders') +
+    kpi('Net revenue per order', cur.orders ? money2(cur.net / cur.orders) : '–', delta(ratio(cur.net, cur.orders), ratio(prev.net, prev.orders)), 'orders') +
+    kpi('Costs on actuals', (actualShare * 100).toFixed(0) + '%', 'the rest is estimated', 'notes') +
     '</div>';
 
   var rows = [
-    ['Revenue (after discounts and refunds)', cur.rev, prev.rev, '', ''],
-    ['Tax by market', -cur.tax, -prev.tax, 'sub', ''],
-    ['Net revenue', cur.net, prev.net, 'total', ''],
-    ['COGS (FIFO, landed)', -cur.cogs, -prev.cogs, 'sub', '--c-cogs'],
-    ['Pick & pack', -cur.pp, -prev.pp, 'sub', '--c-pp'],
-    ['Shipping', -cur.ship, -prev.ship, 'sub', '--c-ship'],
-    ['Payment fees', -cur.fee, -prev.fee, 'sub', '--c-fee'],
-    ['Gross profit', cur.gp, prev.gp, 'total', ''],
-    ['Marketing', -cur.mkt, -prev.mkt, 'sub', '--c-mkt'],
-    ['Contribution', cur.con, prev.con, 'total', ''],
-    ['OPEX', -cur.opex, -prev.opex, 'sub', '--c-opex'],
-    ['Net profit', cur.np, prev.np, 'total', '']
+    ['Revenue (after discounts and refunds)', cur.rev, prev.rev, '', '', ''],
+    ['Tax by market', -cur.tax, -prev.tax, 'sub', '', 'markets'],
+    ['Net revenue', cur.net, prev.net, 'total', '', ''],
+    ['COGS (FIFO, landed)', -cur.cogs, -prev.cogs, 'sub', '--c-cogs', 'costs'],
+    ['Pick & pack', -cur.pp, -prev.pp, 'sub', '--c-pp', 'costs'],
+    ['Shipping', -cur.ship, -prev.ship, 'sub', '--c-ship', 'costs'],
+    ['Payment fees', -cur.fee, -prev.fee, 'sub', '--c-fee', 'costs'],
+    ['Gross profit', cur.gp, prev.gp, 'total', '', ''],
+    ['Marketing', -cur.mkt, -prev.mkt, 'sub', '--c-mkt', 'marketing'],
+    ['Contribution', cur.con, prev.con, 'total', '', ''],
+    ['OPEX', -cur.opex, -prev.opex, 'sub', '--c-opex', 'marketing'],
+    ['Net profit', cur.np, prev.np, 'total', '', '']
   ];
-  html += '<div class="grid g2"><div class="panel"><div class="panel-head"><h3>P&amp;L ladder</h3><span class="small muted">% of net revenue</span></div><div class="scroll"><table><thead><tr><th>Line</th><th>Amount</th><th>%</th><th>Previous</th><th>Prev %</th></tr></thead><tbody>' +
+  html += '<div class="grid g2"><div class="panel"><div class="panel-head"><h3>P&amp;L ladder</h3><span class="small muted">% of net revenue · select a cost line to open it</span></div><div class="scroll"><table><thead><tr><th>Line</th><th>Amount</th><th>%</th><th>Previous</th><th>Prev %</th></tr></thead><tbody>' +
     rows.map(function (r) {
-      return '<tr class="' + r[3] + '"><td>' + (r[4] ? '<i class="dot" style="background:' + cssVar(r[4]) + '"></i>' : '') + esc(r[0]) + '</td><td>' + money(r[1]) +
+      return '<tr class="' + r[3] + (r[5] ? ' click' : '') + '"' + (r[5] ? ' data-go="' + r[5] + '" tabindex="0"' : '') + '><td>' + (r[4] ? '<i class="dot" style="background:' + cssVar(r[4]) + '"></i>' : '') + esc(r[0]) + '</td><td>' + money(r[1]) +
              '</td><td class="pct">' + pct(Math.abs(r[1]), cur.net) + '</td><td>' + money(r[2]) + '</td><td class="pct">' + pct(Math.abs(r[2]), prev.net) + '</td></tr>';
     }).join('') + '</tbody></table></div></div>';
 
@@ -409,11 +479,11 @@ function renderOverview() {
     '<p class="note">Bars are sized against the largest cost. The figure is each line as a share of net revenue.</p></div></div>';
 
   html += '<div class="panel"><div class="panel-head"><h3>Revenue and profit over time</h3>' + granPicker() + '</div><div id="chMain"></div></div>';
-  html += '<div class="panel"><div class="panel-head"><h3>Daily net revenue</h3><span class="small muted">darker = lower, brighter = higher; hover a square for the figure</span></div><div id="heat" class="heat"></div></div></div>';
+  html += '<div class="panel"><div class="panel-head"><h3>Daily net revenue</h3><span class="small muted">brighter = higher · select a day to see its orders</span></div><div id="heat" class="heat"></div></div></div>';
   $('view').innerHTML = html;
 
   var s = series();
-  drawChart('chMain', s.map(function (x) { return x.label; }), [
+  drawChart('chMain', s, [
     { name: 'Net revenue', type: 'bar', color: '--c-rev', values: s.map(function (x) { return x.net; }) },
     { name: 'Gross profit', type: 'line', color: '--c-gp', values: s.map(function (x) { return x.gp; }) },
     { name: 'Contribution', type: 'line', color: '--c-con', values: s.map(function (x) { return x.con; }) },
@@ -421,36 +491,55 @@ function renderOverview() {
   ], money);
 
   var daily = {}, max = 0, cells = '', d;
-  state.data.facts.forEach(function (r) { if (r.d >= state.from && r.d <= state.to) daily[r.d] = (daily[r.d] || 0) + (+r.rev) - (+r.tax); });
+  state.data.facts.forEach(function (r) {
+    if (r.d >= state.from && r.d <= state.to && okM(r) && okT(r) && okC(r)) daily[r.d] = (daily[r.d] || 0) + (+r.rev) - (+r.tax);
+  });
   Object.keys(daily).forEach(function (k) { if (daily[k] > max) max = daily[k]; });
   var pad = (new Date(ms(state.from)).getUTCDay() + 6) % 7;
   for (var i = 0; i < pad; i++) cells += '<i style="visibility:hidden"></i>';
   for (d = state.from; d <= state.to; d = addDays(d, 1)) {
     var v = daily[d] || 0;
-    cells += '<i title="' + esc(fmtDay(d, true) + ': ' + money(v)) + '" style="background:color-mix(in srgb, var(--c-gp) ' + (max ? Math.round(12 + 88 * v / max) : 0) + '%, var(--panel2))"></i>';
+    cells += '<i data-day="' + d + '" tabindex="0" role="button" aria-label="' + esc(fmtDay(d, true) + ', ' + money(v)) + '" title="' + esc(fmtDay(d, true) + ': ' + money(v)) +
+             '" style="background:color-mix(in srgb, var(--c-gp) ' + (max ? Math.round(12 + 88 * v / max) : 0) + '%, var(--panel2))"></i>';
   }
   $('heat').innerHTML = cells;
 }
 
+var DIM_COLS = {
+  name: function (r) { return r.label.toLowerCase(); }, orders: function (r) { return r.orders; }, net: function (r) { return r.net; },
+  cogs: function (r) { return ratio(r.cogs, r.net); }, pp: function (r) { return ratio(r.pp, r.net); },
+  ship: function (r) { return ratio(r.ship, r.net); }, fee: function (r) { return ratio(r.fee, r.net); },
+  gp: function (r) { return r.gp; }, gpp: function (r) { return ratio(r.gp, r.net); }, mkt: function (r) { return r.mkt; },
+  con: function (r) { return r.con; }, conp: function (r) { return ratio(r.con, r.net); }
+};
 function renderDim(key, title, list) {
-  var rows = byDim(key), tot = period(state.from, state.to);
-  var label = function (r) { return list ? nameOf(list, r.name) : r.name; };
-  var line = function (name, r, cls) {
-    return '<tr class="' + cls + '"><td>' + esc(name) + '</td><td>' + num(r.orders) + '</td><td>' + money(r.net) + '</td><td class="pct">' + pct(r.net, tot.net) + '</td>' +
+  var rows = byDim(key), tot = sumRows(rows), sel = state.f[key];
+  rows.forEach(function (r) { r.label = list ? nameOf(list, r.name) : r.name; });
+  var s = state.sort[key] || { col: 'net', dir: -1 }, get = DIM_COLS[s.col] || DIM_COLS.net;
+  rows.sort(function (a, b) { var x = get(a), y = get(b); return (x < y ? -1 : x > y ? 1 : 0) * s.dir; });
+  var line = function (name, r, cls, attrs) {
+    return '<tr class="' + cls + '"' + (attrs || '') + '><td>' + esc(name) + '</td><td>' + num(r.orders) + '</td><td>' + money(r.net) + '</td><td class="pct">' + pct(r.net, tot.net) + '</td>' +
       COSTS.map(function (c) { return '<td class="pct">' + pct(r[c.k], r.net) + '</td>'; }).join('') +
       '<td>' + money(r.gp) + '</td><td class="pct">' + pct(r.gp, r.net) + '</td><td>' + money(r.mkt) + '</td><td>' + money(r.con) + '</td><td class="pct">' + pct(r.con, r.net) + '</td></tr>';
   };
+  var pick = function (r) { return ' data-filter="' + key + '|' + esc(r.name) + '" tabindex="0" aria-pressed="' + (sel === r.name) + '"'; };
   var max = Math.max.apply(null, rows.map(function (r) { return r.net; }).concat([1]));
+  var what = title.replace(/^by /, '');
   var html = '<div class="stack"><div class="panel"><div class="panel-head"><h3>Net revenue and what is left after order costs, ' + esc(title) + '</h3>' +
     '<span class="legend"><button type="button" disabled><i style="background:var(--c-gp)"></i>Gross profit</button><button type="button" disabled><i style="background:var(--c-rev)"></i>Order costs</button></span></div>' +
-    rows.map(function (r) { return hbar(label(r), [[r.gp, '--c-gp'], [r.net - Math.max(0, r.gp), '--c-rev']], max, money(r.net)); }).join('') + '</div>' +
-    '<div class="panel"><div class="panel-head"><h3>P&amp;L ' + esc(title) + '</h3><span class="small muted">cost columns are % of that row’s net revenue</span></div><div class="scroll"><table><thead><tr><th>' +
-    esc(title.replace(/^by /, '')) + '</th><th>Orders</th><th>Net revenue</th><th>Share</th><th>COGS</th><th>Pick &amp; pack</th><th>Shipping</th><th>Pay fees</th><th>Gross profit</th><th>GP %</th><th>Marketing</th><th>Contribution</th><th>Contr %</th></tr></thead><tbody>' +
-    rows.map(function (r) { return line(label(r), r, ''); }).join('') + line('Total', tot, 'total') + '</tbody></table></div>' +
-    '<p class="note">' + (key === 'm'
+    rows.map(function (r) {
+      return hbar(r.label, [[r.gp, '--c-gp'], [r.net - Math.max(0, r.gp), '--c-rev']], max, money(r.net), pick(r) + (sel === r.name ? ' data-on="1"' : ''));
+    }).join('') + '<p class="note">Select a ' + esc(what) + ' to filter the whole dashboard to it. Select it again to clear.</p></div>' +
+    '<div class="panel"><div class="panel-head"><h3>P&amp;L ' + esc(title) + '</h3><span class="small muted">cost columns are % of that row’s net revenue · select a heading to sort</span></div><div class="scroll"><table><thead><tr>' +
+    sortHead(key, 'name', esc(what.charAt(0).toUpperCase() + what.slice(1))) + sortHead(key, 'orders', 'Orders') + sortHead(key, 'net', 'Net revenue') + '<th>Share</th>' +
+    sortHead(key, 'cogs', 'COGS') + sortHead(key, 'pp', 'Pick &amp; pack') + sortHead(key, 'ship', 'Shipping') + sortHead(key, 'fee', 'Pay fees') +
+    sortHead(key, 'gp', 'Gross profit') + sortHead(key, 'gpp', 'GP %') + sortHead(key, 'mkt', 'Marketing') + sortHead(key, 'con', 'Contribution') + sortHead(key, 'conp', 'Contr %') +
+    '</tr></thead><tbody>' +
+    rows.map(function (r) { return line(r.label, r, 'click' + (sel === r.name ? ' sel' : ''), pick(r)); }).join('') + line('Total', tot, 'total') + '</tbody></table></div>' +
+    '<p class="note">' + (key === 'm' && !state.f.t && !state.f.c
       ? 'Marketing is the actual ad spend recorded against each market.'
-      : 'Marketing is not recorded ' + esc(title) + ', so it is shared out by net revenue. OPEX is left out of this view.') +
-    (key === 'c' ? ' Orders counts orders that contain the collection, so an order with two collections appears in both rows.' : '') + '</p></div></div>';
+      : 'Marketing is recorded by market only, so here it is shared out by net revenue.') + ' OPEX is left out of this view.' +
+    (key === 'c' || state.f.c ? ' Orders counts orders that contain the collection, so an order with two collections appears in both rows.' : '') + '</p></div></div>';
   $('view').innerHTML = html;
 }
 
@@ -468,16 +557,17 @@ function renderCosts() {
     }).join('') + '<p class="note">An estimate is replaced by the actual when the invoice or payout is loaded.</p></div></div>';
   $('view').innerHTML = html;
   var s = series();
-  drawChart('chCost', s.map(function (x) { return x.label; }), COSTS.map(function (c) {
+  drawChart('chCost', s, COSTS.map(function (c) {
     return { name: c.n, type: 'line', color: c.c, values: s.map(function (x) { return x.net ? x[c.k] / x.net * 100 : 0; }) };
   }), function (v) { return v.toFixed(1) + '%'; });
 }
 
 function renderMarketing() {
-  var cur = period(state.from, state.to), plat = {}, ox = opexFor(state.from, state.to);
-  state.data.marketing.forEach(function (r) { if (r.d >= state.from && r.d <= state.to) plat[r.p] = (plat[r.p] || 0) + (+r.s); });
+  var cur = period(state.from, state.to), plat = {}, ox = opexFor(state.from, state.to), platTotal = 0;
+  state.data.marketing.forEach(function (r) { if (r.d >= state.from && r.d <= state.to && okM(r)) { plat[r.p] = (plat[r.p] || 0) + (+r.s); platTotal += +r.s; } });
+  var scale = ratio(cur.mkt, platTotal), oxScale = ratio(cur.opex, ox.total);
   var pk = Object.keys(plat).sort(function (a, b) { return plat[b] - plat[a]; });
-  var mrows = byDim('m');
+  var mrows = byDim('m').sort(function (a, b) { return b.net - a.net; });
   var html = '<div class="stack"><div class="kpis">' +
     kpi('Marketing spend', money(cur.mkt), pct(cur.mkt, cur.net) + ' of net revenue') +
     kpi('Net revenue per ' + CUR + '1 of spend', cur.mkt ? (cur.net / cur.mkt).toFixed(2) : '–', 'net revenue ÷ marketing') +
@@ -485,27 +575,26 @@ function renderMarketing() {
     kpi('OPEX', money(cur.opex), pct(cur.opex, cur.net) + ' of net revenue') +
     kpi('Net profit', money(cur.np), pct(cur.np, cur.net) + ' of net revenue') + '</div>';
   html += '<div class="grid g2"><div class="panel"><div class="panel-head"><h3>Spend by platform</h3></div>' +
-    (pk.length ? pk.map(function (p) { return hbar(p, [[plat[p], '--c-mkt']], plat[pk[0]], money(plat[p])); }).join('') : '<p class="muted">No ad spend in this period.</p>') + '</div>';
+    (pk.length ? pk.map(function (p) { return hbar(p, [[plat[p], '--c-mkt']], plat[pk[0]], money(plat[p] * scale)); }).join('') : '<p class="muted">No ad spend in this period.</p>') + '</div>';
   html += '<div class="panel"><div class="panel-head"><h3>OPEX in this period</h3><span class="small muted">monthly figures, shared by day</span></div><div class="scroll"><table><thead><tr><th>Category</th><th>Amount</th><th>%</th></tr></thead><tbody>' +
     Object.keys(ox.by).sort(function (a, b) { return ox.by[b] - ox.by[a]; }).map(function (c) {
-      return '<tr><td>' + esc(c) + '</td><td>' + money(ox.by[c]) + '</td><td class="pct">' + pct(ox.by[c], cur.net) + '</td></tr>';
-    }).join('') + '<tr class="total"><td>Total</td><td>' + money(ox.total) + '</td><td class="pct">' + pct(ox.total, cur.net) + '</td></tr></tbody></table></div></div></div>';
-  html += '<div class="panel"><div class="panel-head"><h3>Marketing by market</h3></div><div class="scroll"><table><thead><tr><th>Market</th><th>Spend</th><th>Net revenue</th><th>Spend %</th><th>Gross profit</th><th>Contribution</th><th>Contr %</th></tr></thead><tbody>' +
+      return '<tr><td>' + esc(c) + '</td><td>' + money(ox.by[c] * oxScale) + '</td><td class="pct">' + pct(ox.by[c] * oxScale, cur.net) + '</td></tr>';
+    }).join('') + '<tr class="total"><td>Total</td><td>' + money(cur.opex) + '</td><td class="pct">' + pct(cur.opex, cur.net) + '</td></tr></tbody></table></div></div></div>';
+  html += '<div class="panel"><div class="panel-head"><h3>Marketing by market</h3><span class="small muted">select a market to filter the dashboard</span></div><div class="scroll"><table><thead><tr><th>Market</th><th>Spend</th><th>Net revenue</th><th>Spend %</th><th>Gross profit</th><th>Contribution</th><th>Contr %</th></tr></thead><tbody>' +
     mrows.map(function (r) {
-      return '<tr><td>' + esc(nameOf('markets', r.name)) + '</td><td>' + money(r.mkt) + '</td><td>' + money(r.net) + '</td><td class="pct">' + pct(r.mkt, r.net) +
+      return '<tr class="click' + (state.f.m === r.name ? ' sel' : '') + '" data-filter="m|' + esc(r.name) + '" tabindex="0"><td>' + esc(nameOf('markets', r.name)) + '</td><td>' + money(r.mkt) + '</td><td>' + money(r.net) + '</td><td class="pct">' + pct(r.mkt, r.net) +
              '</td><td>' + money(r.gp) + '</td><td>' + money(r.con) + '</td><td class="pct">' + pct(r.con, r.net) + '</td></tr>';
     }).join('') + '</tbody></table></div></div></div>';
   $('view').innerHTML = html;
 }
 
 function renderOrders() {
-  var o = state.ord, meta = state.data.meta;
-  var opt = function (list, sel, all) {
-    return '<option value="">' + all + '</option>' + (list || []).map(function (x) {
-      return '<option value="' + esc(x.code) + '"' + (x.code === sel ? ' selected' : '') + '>' + esc(x.name) + '</option>';
-    }).join('');
+  var o = state.ord, body;
+  var head = function (col, label, cls) {
+    var on = o.sort === col;
+    return '<th class="sortable' + (cls ? ' ' + cls : '') + '" data-osort="' + col + '" tabindex="0" aria-sort="' + (on ? (o.dir === 'asc' ? 'ascending' : 'descending') : 'none') + '">' +
+           label + (on ? (o.dir === 'asc' ? ' ▲' : ' ▼') : '') + '</th>';
   };
-  var body;
   if (o.loading && !o.rows.length) body = '<tr><td colspan="12" class="l muted">Loading…</td></tr>';
   else if (!o.rows.length) body = '<tr><td colspan="12" class="l muted">No orders match.</td></tr>';
   else body = o.rows.map(function (r) {
@@ -531,19 +620,19 @@ function renderOrders() {
   }).join('');
   var pages = Math.max(1, Math.ceil(o.count / PAGE));
   $('view').innerHTML = '<div class="panel"><div class="panel-head"><h3>Orders in this period</h3><div class="filters">' +
-    '<select id="oMarket" aria-label="Market">' + opt(meta.markets, o.market, 'All markets') + '</select>' +
-    '<select id="oTpl" aria-label="3PL">' + opt(meta.threepls, o.threepl, 'All 3PLs') + '</select>' +
     '<input id="oQ" type="search" placeholder="Order number" aria-label="Order number" value="' + esc(o.q) + '"></div></div>' +
-    '<div class="scroll"><table><thead><tr><th>Order</th><th class="l">Date</th><th class="l">Market</th><th class="l">3PL</th><th>Units</th><th>Net revenue</th><th>COGS</th><th>Pick &amp; pack</th><th>Shipping</th><th>Pay fees</th><th>Gross profit</th><th class="l">Source</th></tr></thead><tbody>' +
+    '<div class="scroll"><table><thead><tr><th>Order</th>' + head('order_date', 'Date', 'l') + '<th class="l">Market</th><th class="l">3PL</th>' + head('units', 'Units') + head('net_revenue', 'Net revenue') +
+    head('cogs', 'COGS') + head('pick_pack', 'Pick &amp; pack') + head('shipping', 'Shipping') + head('payment_fee', 'Pay fees') + head('gross_profit', 'Gross profit') + '<th class="l">Source</th></tr></thead><tbody>' +
     body + '</tbody></table></div><div class="pager"><span class="muted">' + num(o.count) + ' orders · page ' + (o.page + 1) + ' of ' + pages + '</span>' +
     '<button class="btn small" type="button" id="oPrev"' + (o.page ? '' : ' disabled') + '>Previous</button>' +
     '<button class="btn small" type="button" id="oNext"' + (o.page + 1 < pages ? '' : ' disabled') + '>Next</button></div>' +
-    '<p class="note">Select an order to see each line and where every cost came from. Marketing and OPEX are not on individual orders.</p></div>';
+    '<p class="note">Select an order to see each line and where every cost came from. Select a heading to sort. Marketing and OPEX are not on individual orders.' +
+    (state.f.c ? ' The collection filter does not apply to this list.' : '') + '</p></div>';
 }
 function loadOrders() {
   var o = state.ord; o.loading = true; o.open = null;
   if (state.tab === 'orders') renderOrders();
-  return provider.orders({ from: state.from, to: state.to, market: o.market, threepl: o.threepl, q: o.q, page: o.page })
+  return provider.orders({ from: state.from, to: state.to, market: state.f.m, threepl: state.f.t, q: o.q, page: o.page, sort: o.sort, dir: o.dir })
     .then(function (res) { o.rows = res.rows || []; o.count = res.count || 0; })
     .catch(function (e) { o.rows = []; o.count = 0; setStatus('Could not load orders: ' + e.message); })
     .then(function () { o.loading = false; if (state.tab === 'orders') renderOrders(); });
@@ -555,12 +644,18 @@ function renderNotes() {
     '<h3>What you are looking at</h3>' +
     (m.sample ? '<p><span class="badge warn">SAMPLE DATA</span> Every number on this dashboard is invented so the layout can be checked. Nothing here comes from the client’s systems yet.</p>' : '') +
     '<p>Data covers ' + (m.min ? esc(fmtDay(String(m.min), true)) + ' to ' + esc(fmtDay(String(m.max), true)) : 'no dates yet') + '.</p>' +
+    '<h3>Getting around</h3><ul>' +
+    '<li>Use the Market, 3PL and Collection filters at the top, or select a row or bar on the By market, By 3PL and By collection tabs. A filter applies to every tab until you clear it.</li>' +
+    '<li>Hover a chart for the figures. Select a bar to zoom in to that day, week or month; use Back to return.</li>' +
+    '<li>Select a square in the daily calendar to see that day’s orders.</li>' +
+    '<li>Select a column heading to sort a table, and a tile or a cost line on the Overview to open its detail.</li></ul>' +
     '<h3>Definitions</h3><ul>' +
     '<li><b>Revenue</b>: sales after discounts and refunds, tax still included.</li>' +
     '<li><b>Net revenue</b>: revenue minus the tax that belongs to the ship-to market. Every percentage on the dashboard is a share of net revenue.</li>' +
     '<li><b>Gross profit</b>: net revenue minus COGS, pick &amp; pack, shipping and payment fees. These four are stored on each order line.</li>' +
     '<li><b>Contribution</b>: gross profit minus marketing. Ad spend is recorded by day, market and platform.</li>' +
     '<li><b>Net profit</b>: contribution minus OPEX. OPEX is entered per month and shared evenly across the days of that month.</li>' +
+    '<li><b>When a filter is on</b>: marketing is exact for a market. For a 3PL or collection it is shared out by net revenue, and so is OPEX under any filter.</li>' +
     '<li><b>Previous period</b>: the same number of days immediately before the selected range.</li></ul>' +
     '<h3>Actual or estimated</h3><p>Each cost on each order line is marked actual (from an invoice or payout) or estimated (from a rate card or model). In the selected period ' +
     pct(cur.costs - cur.est, cur.costs) + ' of order costs are actuals.</p>' +
@@ -578,6 +673,21 @@ function renderNotes() {
 
 /* ---------- shell ---------- */
 function setStatus(t) { $('status').textContent = t || ''; }
+function renderFilters() {
+  var meta = state.data.meta, f = state.f;
+  var sel = function (id, label, items, cur) {
+    return '<label>' + label + ' <select id="' + id + '"><option value="">All</option>' + items.map(function (x) {
+      return '<option value="' + esc(x.code) + '"' + (x.code === cur ? ' selected' : '') + '>' + esc(x.name) + '</option>';
+    }).join('') + '</select></label>';
+  };
+  $('filters').innerHTML =
+    sel('fM', 'Market', meta.markets || [], f.m) + sel('fT', '3PL', meta.threepls || [], f.t) +
+    sel('fC', 'Collection', collections().map(function (c) { return { code: c, name: c }; }), f.c) +
+    (anyFilter() ? '<button class="btn small" type="button" id="fClear">Clear filters</button>' : '') +
+    (state.stack.length ? '<button class="btn small" type="button" id="back">← Back to ' + esc(fmtDay(state.stack[state.stack.length - 1].from)) + ' – ' + esc(fmtDay(state.stack[state.stack.length - 1].to)) + '</button>' : '') +
+    (state.f.t || state.f.c ? '<span class="small muted">Filtered view: marketing and OPEX are shared out by net revenue.</span>'
+      : state.f.m ? '<span class="small muted">Filtered view: OPEX is shared out by net revenue.</span>' : '');
+}
 function render() {
   var title = TABS.filter(function (t) { return t[0] === state.tab; })[0] || TABS[0];
   state.tab = title[0];
@@ -589,11 +699,13 @@ function render() {
     return '<button type="button" data-preset="' + p[0] + '" class="' + (state.preset === p[0] ? 'on' : '') + '">' + p[1] + '</button>';
   }).join('');
   $('from').value = state.from; $('to').value = state.to;
-  var pr = prevRange();
-  $('rangeNote').textContent = daysBetween(state.from, state.to) + ' days, compared with ' + fmtDay(pr.from) + ' to ' + fmtDay(pr.to, true);
+  var pr = prevRange(), len = daysBetween(state.from, state.to);
+  $('rangeNote').textContent = len + (len === 1 ? ' day' : ' days') + ', compared with ' + fmtDay(pr.from) + ' to ' + fmtDay(pr.to, true);
   if (!state.data) return;
   $('sampleBadge').hidden = !state.data.meta.sample;
   $('demoBadge').hidden = state.mode !== 'demo';
+  renderFilters();
+  state.charts = {};
   if (state.tab === 'overview') renderOverview();
   else if (state.tab === 'markets') renderDim('m', 'by market', 'markets');
   else if (state.tab === 'threepl') renderDim('t', 'by 3PL', 'threepls');
@@ -615,6 +727,27 @@ function applyPreset(p) {
   if (p !== 'lastmonth' && addDays(t, -1) >= f) { t = addDays(t, -1); if (p === '4w' || p === '90d') f = addDays(f, -1); }
   state.preset = p; state.from = f; state.to = t;
 }
+/* Narrow the date range (from a chart bar or a calendar day), remembering where we came from. */
+function zoom(from, to, tab) {
+  state.stack.push({ from: state.from, to: state.to, preset: state.preset, gran: state.gran, tab: state.tab });
+  state.preset = ''; state.from = from; state.to = to;
+  if (daysBetween(from, to) <= 31) state.gran = 'day';
+  if (tab && tab !== state.tab) { state.tab = tab; history.replaceState(null, '', '#' + tab); }
+  load();
+}
+function goBack() {
+  var s = state.stack.pop(); if (!s) return;
+  state.from = s.from; state.to = s.to; state.preset = s.preset; state.gran = s.gran;
+  if (s.tab !== state.tab) { state.tab = s.tab; history.replaceState(null, '', '#' + s.tab); }
+  load();
+}
+function setFilter(key, value) {
+  state.f[key] = state.f[key] === value ? '' : value;
+  state.ord.page = 0;
+  render();
+  if (key !== 'c') loadOrders();
+}
+function go(tab) { location.hash = tab; }
 function load() {
   var pr = prevRange();
   setStatus('Loading…');
@@ -622,21 +755,22 @@ function load() {
   return provider.data(pr.from, state.to).then(function (d) {
     d.facts = d.facts || []; d.orders = d.orders || []; d.marketing = d.marketing || []; d.opex = d.opex || []; d.meta = d.meta || {};
     state.data = d;
-    setStatus(d.facts.length ? '' : 'No orders in this period. If the database is new, run sql/001_schema.sql and then sql/002_sample_data.sql in the Supabase SQL editor.');
+    setStatus(d.facts.length ? '' : 'No orders in this period.');
     render();
     return loadOrders();
   }).catch(function (e) {
-    setStatus('Could not load the data: ' + e.message + '. If the database has not been set up yet, run sql/001_schema.sql in the Supabase SQL editor.');
+    setStatus('Could not load the data: ' + e.message + '. If you are signed in but see this, your email may not be on the allowed list.');
     render();
   });
 }
 function start(p, who, mode) {
   provider = p; state.who = who; state.mode = mode;
+  state.stack = []; state.f = { m: '', t: '', c: '' };
   $('signin').hidden = true; $('app').hidden = false;
   $('who').textContent = who;
   $('signOut').textContent = mode === 'demo' ? 'Leave demo' : 'Sign out';
   state.tab = (location.hash || '#overview').slice(1);
-  applyPreset(state.preset);
+  applyPreset(state.preset || '4w');
   load();
 }
 function showSignin(msg) {
@@ -645,17 +779,53 @@ function showSignin(msg) {
 }
 
 /* ---------- events ---------- */
-document.addEventListener('click', function (e) {
-  var t = e.target.closest('button, tr.click'); if (!t) return;
-  if (t.dataset.preset) { applyPreset(t.dataset.preset); load(); }
-  else if (t.dataset.gran) { state.gran = t.dataset.gran; render(); }
-  else if (t.dataset.chart) { var h = state.hidden[t.dataset.chart]; h[t.dataset.series] = !h[t.dataset.series]; render(); }
+function act(t, e) {
+  var d = t.dataset;
+  if (d.preset) { state.stack = []; applyPreset(d.preset); load(); }
+  else if (d.gran) { state.gran = d.gran; render(); }
+  else if (d.chart) { var h = state.hidden[d.chart]; h[d.series] = !h[d.series]; render(); }
+  else if (d.filter) { var p = d.filter.split('|'); setFilter(p[0], p.slice(1).join('|')); }
+  else if (d.sort) {
+    var s = d.sort.split('|'), cur = state.sort[s[0]] || {};
+    state.sort[s[0]] = { col: s[1], dir: cur.col === s[1] ? -cur.dir : (s[1] === 'name' ? 1 : -1) };
+    render();
+  }
+  else if (d.osort) {
+    if (!ORDER_SORTS[d.osort]) return;
+    var o = state.ord;
+    o.dir = o.sort === d.osort && o.dir === 'desc' ? 'asc' : 'desc'; o.sort = d.osort; o.page = 0; loadOrders();
+  }
+  else if (d.day) zoom(d.day, d.day, 'orders');
+  else if (d.go) go(d.go);
+  else if (d.order) toggleOrder(d.order);
+  else if (d.plot && e) {
+    var hit = chartIndex(t, e); if (!hit) return;
+    var b = hit.c.buckets[hit.i];
+    if (b.first === state.from && b.last === state.to) zoom(b.first, b.last, 'orders'); else zoom(b.first, b.last);
+  }
   else if (t.id === 'oPrev') { state.ord.page--; loadOrders(); }
   else if (t.id === 'oNext') { state.ord.page++; loadOrders(); }
-  else if (t.dataset.order) toggleOrder(t.dataset.order);
+  else if (t.id === 'fClear') { state.f = { m: '', t: '', c: '' }; state.ord.page = 0; render(); loadOrders(); }
+  else if (t.id === 'back') goBack();
+}
+var CLICKABLE = 'button, tr.click, [data-filter], [data-sort], [data-osort], [data-day], [data-go], svg[data-plot]';
+document.addEventListener('click', function (e) {
+  var t = e.target.closest(CLICKABLE); if (t && !t.disabled) act(t, e);
 });
 document.addEventListener('keydown', function (e) {
-  if (e.key === 'Enter' && e.target.matches && e.target.matches('tr.click')) toggleOrder(e.target.dataset.order);
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  var t = e.target;
+  if (t.matches && t.matches('tr.click, [data-filter], [data-sort], [data-osort], [data-day], [data-go]') && t.tagName !== 'BUTTON') { e.preventDefault(); act(t, null); }
+});
+document.addEventListener('mousemove', function (e) {
+  var svg = e.target.closest && e.target.closest('svg[data-plot]');
+  if (svg) chartHover(svg, e);
+});
+document.addEventListener('mouseout', function (e) {
+  var svg = e.target.closest && e.target.closest('svg[data-plot]');
+  if (svg && !(e.relatedTarget && svg.contains(e.relatedTarget))) {
+    svg.parentNode.querySelector('.tip').hidden = true; svg.querySelector('.hl').setAttribute('visibility', 'hidden');
+  }
 });
 function toggleOrder(raw) {
   var o = state.ord, id = +raw;
@@ -665,14 +835,16 @@ function toggleOrder(raw) {
     .catch(function (e) { setStatus('Could not load the order lines: ' + e.message); });
 }
 document.addEventListener('change', function (e) {
-  var id = e.target.id;
+  var id = e.target.id, v = e.target.value;
   if (id === 'from' || id === 'to') {
     var f = $('from').value, t = $('to').value;
     if (!f || !t || f > t) return;
-    state.preset = ''; state.from = f; state.to = t; load();
-  } else if (id === 'oMarket') { state.ord.market = e.target.value; state.ord.page = 0; loadOrders(); }
-  else if (id === 'oTpl') { state.ord.threepl = e.target.value; state.ord.page = 0; loadOrders(); }
-  else if (id === 'oQ') { state.ord.q = e.target.value.trim(); state.ord.page = 0; loadOrders(); }
+    state.stack = []; state.preset = ''; state.from = f; state.to = t; load();
+  }
+  else if (id === 'fM') { state.f.m = v; state.ord.page = 0; render(); loadOrders(); }
+  else if (id === 'fT') { state.f.t = v; state.ord.page = 0; render(); loadOrders(); }
+  else if (id === 'fC') { state.f.c = v; render(); }
+  else if (id === 'oQ') { state.ord.q = v.trim(); state.ord.page = 0; loadOrders(); }
 });
 window.addEventListener('hashchange', function () {
   if ($('app').hidden) return;
