@@ -63,7 +63,7 @@ var state = {
   f: { m: '', t: '', c: '' },          // filters: market, 3PL, collection
   stack: [],                           // earlier date ranges, for the Back button
   sort: {},                            // table sorts, by table key
-  data: null, hidden: {}, charts: {}, who: '', mode: '',
+  data: null, sync: [], hidden: {}, charts: {}, who: '', mode: '',
   ord: { page: 0, q: '', sort: 'order_date', dir: 'desc', open: null, rows: [], count: 0, lines: {}, loading: false }
 };
 var sb = null, provider = null;
@@ -200,7 +200,8 @@ function demoProvider() {
     lines: function (id) {
       var o = orders.filter(function (x) { return x.id === id; })[0];
       return Promise.resolve(o ? o.lines : []);
-    }
+    },
+    sync: function () { return Promise.resolve([]); }
   };
 }
 
@@ -224,6 +225,10 @@ function sbProvider() {
     lines: function (id) {
       return sb.from('order_lines').select('*, skus(name, collection)').eq('order_id', id).order('id')
         .then(function (res) { return check(res).data; });
+    },
+    /* Which live sheets feed the database and when each last synced. */
+    sync: function () {
+      return sb.rpc('sync_status').then(function (res) { return res.error ? [] : (res.data || []); }, function () { return []; });
     }
   };
 }
@@ -644,6 +649,15 @@ function renderNotes() {
     '<h3>What you are looking at</h3>' +
     (m.sample ? '<p><span class="badge warn">SAMPLE DATA</span> Every number on this dashboard is invented so the layout can be checked. Nothing here comes from the client’s systems yet.</p>' : '') +
     '<p>Data covers ' + (m.min ? esc(fmtDay(String(m.min), true)) + ' to ' + esc(fmtDay(String(m.max), true)) : 'no dates yet') + '.</p>' +
+    '<h3>Live sheets</h3>' + (state.sync.length
+      ? '<div class="scroll"><table><thead><tr><th>Sheet</th><th class="l">Tab</th><th>Rows</th><th class="l">Last synced</th><th class="l">Status</th></tr></thead><tbody>' +
+        state.sync.map(function (s) {
+          var bad = s.last_status === 'error';
+          return '<tr><td>' + esc(s.name) + '</td><td class="l">' + esc(s.tab) + '</td><td>' + num(+s.rows || 0) + '</td><td class="l">' +
+            (s.last_ok ? esc(new Date(s.last_ok).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })) : 'never') + '</td><td class="l">' +
+            (!s.enabled ? '<span class="tag">switched off</span>' : bad ? '<span class="tag est">problem</span> ' + esc(s.last_message || '') : s.last_status ? '<span class="tag">ok</span>' : '<span class="tag">waiting for first run</span>') + '</td></tr>';
+        }).join('') + '</tbody></table></div><p class="muted small">Sheets are read every 15 minutes. This page refreshes itself every 5 minutes.</p>'
+      : '<p>No live sheets are connected yet' + (state.mode === 'demo' ? ' (not shown in the demo).' : '. The receiving side is ready; sheets appear here once they are shared and listed.') + '</p>') +
     '<h3>Getting around</h3><ul>' +
     '<li>Use the Market, 3PL and Collection filters at the top, or select a row or bar on the By market, By 3PL and By collection tabs. A filter applies to every tab until you clear it.</li>' +
     '<li>Hover a chart for the figures. Select a bar to zoom in to that day, week or month; use Back to return.</li>' +
@@ -757,6 +771,7 @@ function load() {
     state.data = d;
     setStatus(d.facts.length ? '' : 'No orders in this period.');
     render();
+    provider.sync().then(function (s) { state.sync = s || []; if (state.tab === 'notes') render(); });
     return loadOrders();
   }).catch(function (e) {
     setStatus('Could not load the data: ' + e.message + '. If you are signed in but see this, your email may not be on the allowed list.');
@@ -850,6 +865,10 @@ window.addEventListener('hashchange', function () {
   if ($('app').hidden) return;
   state.tab = (location.hash || '#overview').slice(1); render();
 });
+/* Signed-in pages pick up new data by themselves every 5 minutes (not while reading the orders list). */
+setInterval(function () {
+  if (state.mode === 'live' && state.data && !$('app').hidden && !document.hidden && state.tab !== 'orders') load();
+}, 5 * 60 * 1000);
 var resizeTimer;
 window.addEventListener('resize', function () {
   clearTimeout(resizeTimer);

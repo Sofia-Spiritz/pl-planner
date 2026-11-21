@@ -33,6 +33,17 @@ In the Supabase dashboard, for each person who should see the data:
 
 Then sign in on the page with that email and password. Only signed-in users on the allowed list can read the data, and nobody can change data from the web page.
 
+## Live Google Sheets (receiving side)
+
+The database can pull Google Sheet tabs into itself every 15 minutes:
+
+- `sheet_sources` lists the tabs to read; `sheet_rows` holds a copy of each tab's rows; `sheet_sync_log` records every run.
+- The `sync-sheets` function (in `supabase/functions/`) does the reading, through a read-only Google service account. Each sheet must be shared as Viewer with that account's email.
+- The service account key is stored as the Supabase secret `GOOGLE_SERVICE_ACCOUNT`. It is never kept in this repo.
+- The dashboard's Data notes tab shows each sheet and when it last synced.
+
+Not done yet: the Google service account itself, listing the real sheets, and the rules that turn raw sheet rows into dashboard numbers.
+
 ## How the numbers are defined
 
 - **Revenue**: sales after discounts and refunds, tax still included.
