@@ -181,5 +181,6 @@ Deno.serve(async (req) => {
       results.push({ name: s.name, status: "error", message });
     }
   }
+  console.log("sync-sheets result " + JSON.stringify(results)); // names, statuses and messages only, no sheet data
   return json({ ok: true, synced: results.filter((r) => r.status === "ok").length, results });
 });
