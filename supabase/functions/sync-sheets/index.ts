@@ -16,8 +16,42 @@ const db = createClient(
   { auth: { persistSession: false } },
 );
 
+// The dashboard (another web address) may call this function, so browsers need these headers.
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+};
+
 function json(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+  return new Response(JSON.stringify(body), { status, headers: { ...CORS, "Content-Type": "application/json" } });
+}
+
+// The key may be stored as the JSON file's text, or as that text in base64 (one safe line).
+function readKey(raw: string) {
+  const t = raw.trim();
+  return JSON.parse(t.startsWith("{") ? t : new TextDecoder().decode(Uint8Array.from(atob(t), (c) => c.charCodeAt(0))));
+}
+
+// A signed-in dashboard user on the allowed list may also start a sync ("Sync now").
+async function isDashboardUser(req: Request) {
+  const token = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "");
+  if (!token) return false;
+  const { data, error } = await db.auth.getUser(token);
+  const email = data?.user?.email;
+  if (error || !email) return false;
+  const { data: rows } = await db.from("dashboard_users").select("email");
+  return (rows || []).some((r: { email: string }) => r.email.toLowerCase() === email.toLowerCase());
+}
+
+function googleProblem(status: number, why: string) {
+  if (/not supported for this document/i.test(why)) {
+    return "This file is an Excel file stored in Google Drive, not a Google Sheet, so it cannot be read live. Open it, choose File > Save as Google Sheets, share the new copy with the robot and use its link.";
+  }
+  if (status === 403 || status === 404) {
+    return "Google would not open the sheet. Check it is shared with the robot's email as Viewer and that the link and tab are right. (" + why + ")";
+  }
+  return "Google Sheets error: " + why;
 }
 
 function b64url(input: string | ArrayBuffer) {
@@ -63,17 +97,24 @@ type Source = { id: number; name: string; spreadsheet_id: string; tab: string; h
 
 // Reads one tab and turns it into [{ row_no, data: { "Column name": value } }].
 async function readTab(token: string, s: Source) {
-  const url = "https://sheets.googleapis.com/v4/spreadsheets/" + encodeURIComponent(s.spreadsheet_id) +
-    "/values/" + encodeURIComponent("'" + s.tab.replace(/'/g, "''") + "'") +
-    "?valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=FORMATTED_STRING";
-  const res = await fetch(url, { headers: { Authorization: "Bearer " + token } });
-  const out = await res.json();
-  if (!res.ok) {
-    const why = out?.error?.message || String(res.status);
-    throw new Error(res.status === 403 || res.status === 404
-      ? "Google would not open the sheet. Check it is shared with the service account and the ID and tab name are right. (" + why + ")"
-      : "Google Sheets error: " + why);
+  const base = "https://sheets.googleapis.com/v4/spreadsheets/" + encodeURIComponent(s.spreadsheet_id);
+  const auth = { headers: { Authorization: "Bearer " + token } };
+  // The tab can be given by name, or as "gid:123" (the number after gid= in the sheet's address).
+  let tab = s.tab;
+  const gid = /^gid:(\d+)$/.exec(s.tab.trim());
+  if (gid) {
+    const mres = await fetch(base + "?fields=sheets.properties(sheetId,title)", auth);
+    const meta = await mres.json();
+    if (!mres.ok) throw new Error(googleProblem(mres.status, meta?.error?.message || String(mres.status)));
+    const hit = (meta.sheets || []).find((x: { properties: { sheetId: number } }) => String(x.properties.sheetId) === gid[1]);
+    if (!hit) throw new Error("No tab with that gid was found in the sheet.");
+    tab = hit.properties.title;
   }
+  const url = base + "/values/" + encodeURIComponent("'" + tab.replace(/'/g, "''") + "'") +
+    "?valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=FORMATTED_STRING";
+  const res = await fetch(url, auth);
+  const out = await res.json();
+  if (!res.ok) throw new Error(googleProblem(res.status, out?.error?.message || String(res.status)));
   const values: unknown[][] = out.values || [];
   const head = values[s.header_row - 1] || [];
   const seen: Record<string, number> = {};
@@ -101,11 +142,13 @@ async function log(source_id: number, started: string, status: "ok" | "error", r
 
 Deno.serve(async (req) => {
   // Health check: says only whether the Google key has been set.
+  if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
   if (req.method === "GET") return json({ ok: true, google_key_set: !!Deno.env.get("GOOGLE_SERVICE_ACCOUNT") });
 
-  const { data: allowed, error: authErr } = await db.rpc("check_sync_secret", { p: req.headers.get("x-sync-secret") ?? "" });
+  // Two callers are allowed: the database scheduler (secret header) or a signed-in dashboard user.
+  const { data: bySecret, error: authErr } = await db.rpc("check_sync_secret", { p: req.headers.get("x-sync-secret") ?? "" });
   if (authErr) return json({ error: "could not check the caller" }, 500);
-  if (!allowed) return json({ error: "not allowed" }, 401);
+  if (!bySecret && !(await isDashboardUser(req))) return json({ error: "not allowed" }, 401);
 
   const { data: sources, error } = await db.from("sheet_sources")
     .select("id, name, spreadsheet_id, tab, header_row").eq("enabled", true).order("id");
@@ -117,7 +160,7 @@ Deno.serve(async (req) => {
   try {
     const raw = Deno.env.get("GOOGLE_SERVICE_ACCOUNT");
     if (!raw) throw new Error("The Google service account key has not been set in Supabase yet.");
-    token = await googleToken(JSON.parse(raw));
+    token = await googleToken(readKey(raw));
   } catch (e) {
     setupError = (e as Error).message;
   }

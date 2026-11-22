@@ -229,6 +229,13 @@ function sbProvider() {
     /* Which live sheets feed the database and when each last synced. */
     sync: function () {
       return sb.rpc('sync_status').then(function (res) { return res.error ? [] : (res.data || []); }, function () { return []; });
+    },
+    /* Ask the database to read the live sheets right now instead of waiting for the schedule. */
+    syncNow: function () {
+      return sb.functions.invoke('sync-sheets', { body: {} }).then(function (res) {
+        if (res.error) throw new Error(res.error.message || 'the sync could not be started');
+        return res.data || {};
+      });
     }
   };
 }
@@ -658,6 +665,7 @@ function renderNotes() {
             (!s.enabled ? '<span class="tag">switched off</span>' : bad ? '<span class="tag est">problem</span> ' + esc(s.last_message || '') : s.last_status ? '<span class="tag">ok</span>' : '<span class="tag">waiting for first run</span>') + '</td></tr>';
         }).join('') + '</tbody></table></div><p class="muted small">Sheets are read every 15 minutes. This page refreshes itself every 5 minutes.</p>'
       : '<p>No live sheets are connected yet' + (state.mode === 'demo' ? ' (not shown in the demo).' : '. The receiving side is ready; sheets appear here once they are shared and listed.') + '</p>') +
+    (state.mode === 'live' ? '<p><button class="btn small" type="button" id="syncNow"' + (state.syncing ? ' disabled' : '') + '>' + (state.syncing ? 'Syncing…' : 'Sync now') + '</button> <span class="small muted" role="status">' + esc(state.syncMsg || '') + '</span></p>' : '') +
     '<h3>Getting around</h3><ul>' +
     '<li>Use the Market, 3PL and Collection filters at the top, or select a row or bar on the By market, By 3PL and By collection tabs. A filter applies to every tab until you clear it.</li>' +
     '<li>Hover a chart for the figures. Select a bar to zoom in to that day, week or month; use Back to return.</li>' +
@@ -822,6 +830,17 @@ function act(t, e) {
   else if (t.id === 'oNext') { state.ord.page++; loadOrders(); }
   else if (t.id === 'fClear') { state.f = { m: '', t: '', c: '' }; state.ord.page = 0; render(); loadOrders(); }
   else if (t.id === 'back') goBack();
+  else if (t.id === 'syncNow') syncNow();
+}
+function syncNow() {
+  if (!provider.syncNow || state.syncing) return;
+  state.syncing = true; state.syncMsg = ''; render();
+  provider.syncNow().then(function (out) {
+    var r = out.results || [], bad = r.filter(function (x) { return x.status !== 'ok'; }).length;
+    state.syncMsg = !r.length ? (out.note || 'Nothing to sync.') : bad ? bad + ' of ' + r.length + ' sheets had a problem; see the Status column.' : 'Synced ' + r.length + (r.length === 1 ? ' sheet.' : ' sheets.');
+  }).catch(function (e) { state.syncMsg = 'Sync failed: ' + e.message; })
+    .then(function () { return provider.sync(); })
+    .then(function (s) { state.sync = s || []; state.syncing = false; if (state.data) load(); });
 }
 var CLICKABLE = 'button, tr.click, [data-filter], [data-sort], [data-osort], [data-day], [data-go], svg[data-plot]';
 document.addEventListener('click', function (e) {

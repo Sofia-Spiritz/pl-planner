@@ -9,6 +9,11 @@ dist/
 
 # Allowed-user list (email addresses)
 supabase/seeds/00_private_users.sql
+# Live sheet addresses
+supabase/seeds/02_private_sheets.sql
+# Key files must never be committed
+*service-account*.json
+pl-planner-sync*.json
 
 # Local preview settings for Claude
 .claude/
