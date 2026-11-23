@@ -69,7 +69,7 @@ var state = {
   f: { m: '', t: '', c: '' },          // filters: market, 3PL, collection
   stack: [],                           // earlier date ranges, for the Back button
   sort: {},                            // table sorts, by table key
-  data: null, sync: [], funnel: null, snap: { list: null, id: null, rows: null, q: '', loading: false }, hidden: {}, charts: {}, who: '', mode: '',
+  data: null, sync: [], funnel: null, snap: { list: null, id: null, rows: null, q: '', sq: '', closed: {}, loading: false }, hidden: {}, charts: {}, who: '', mode: '',
   ord: { page: 0, q: '', sort: 'order_date', dir: 'desc', open: null, rows: [], count: 0, lines: {}, loading: false }
 };
 var sb = null, provider = null;
@@ -213,9 +213,11 @@ function demoProvider() {
       return Promise.resolve([
         { id: 1, sheet: 'Sample sheet (invented)', tab: 'Monthly P&L', copied_at: null, rows: 9, cols: 4 },
         { id: 2, sheet: 'Sample sheet (invented)', tab: 'Fixes list', copied_at: null, rows: 4, cols: 4 }
-      ]);
+      ].concat(['Order 2 - Sample supplier', 'Order 10 - Sample supplier', 'Sample stock check', 'Sample supplier tracker', 'Sample forecast', 'Sample shipping rates', 'Sample P&L by location']
+        .map(function (n, i) { return { id: 10 + i, sheet: n, tab: i === 2 ? 'Daily check' : 'Sheet1', copied_at: null, rows: 3, cols: 3 }; })));
     },
     snapTab: function (id) {
+      if (id >= 10) return Promise.resolve([['Item', 'Quantity', 'Value'], ['Sample row A', '120', '£1,440'], ['Sample row B', '80', '£960']]);
       return Promise.resolve(id === 1 ? [
         ['Sample monthly P&L'], ['Invented numbers, for the demo only.'], [],
         ['£', 'Sep 26', 'Oct 26', 'Nov 26'], ['Revenue'], ['Net revenue', '£120,400', '£134,900', '£141,250'],
@@ -778,6 +780,45 @@ function openSnap(id) {
     .catch(function (e) { S.rows = []; setStatus('Could not load that tab: ' + e.message); })
     .then(function () { S.loading = false; if (state.tab === 'sheets') renderSheets(); });
 }
+/* Which group a sheet belongs to, judged from its name. First match wins. */
+var SHEET_GROUPS = [
+  ['Start here', /^a guide/i],
+  ['Forecasts', /forecast/i],
+  ['Purchase orders', /^order \d|^hql-|\bpo \d|order sheet|allocation of po|template orders/i],
+  ['Suppliers', /supplier|lead-time|pricing compare/i],
+  ['Finance and margins', /p&l|margin|financ|funnel/i],
+  ['Stock and supply', /stock|supply|resuppl|inventory|loading plan|reorder/i],
+  ['Shipping and tariffs', /shipping|tariff|freight|rates|routing|air ship/i]
+];
+function sheetGroup(name) {
+  for (var i = 0; i < SHEET_GROUPS.length; i++) if (SHEET_GROUPS[i][1].test(name)) return SHEET_GROUPS[i][0];
+  return 'Other';
+}
+/* The left-hand list: sheets in groups, narrowed by the search box (matches sheet or tab names). */
+function fillSheetList() {
+  var S = state.snap, box = $('snList'); if (!box || !S.list) return;
+  var cur = S.list.filter(function (t) { return t.id === S.id; })[0] || S.list[0];
+  var needle = S.sq.toLowerCase(), sheets = {}, order = [];
+  S.list.forEach(function (t) {
+    var s = sheets[t.sheet];
+    if (!s) { s = sheets[t.sheet] = { name: t.sheet, first: t.id, tabs: 0, hit: !needle || t.sheet.toLowerCase().indexOf(needle) >= 0, tabHit: null }; order.push(s); }
+    s.tabs++;
+    if (needle && !s.hit && !s.tabHit && t.tab.toLowerCase().indexOf(needle) >= 0) s.tabHit = t;
+  });
+  var groups = {}, names = SHEET_GROUPS.map(function (g) { return g[0]; }).concat(['Other']);
+  order.forEach(function (s) { if (s.hit || s.tabHit) (groups[sheetGroup(s.name)] = groups[sheetGroup(s.name)] || []).push(s); });
+  var html = names.filter(function (g) { return groups[g]; }).map(function (g) {
+    var list = groups[g].sort(function (a, b) { return a.name.localeCompare(b.name, 'en', { numeric: true }); });
+    var closed = !needle && S.closed[g] && sheetGroup(cur.sheet) !== g;
+    return '<div class="grp"><button type="button" class="grp-head" data-grp="' + esc(g) + '" aria-expanded="' + (!closed) + '">' + (closed ? '▸ ' : '▾ ') + esc(g) +
+      ' <span class="muted">' + list.length + '</span></button>' + (closed ? '' : list.map(function (s) {
+        var target = s.tabHit ? s.tabHit.id : s.first;
+        return '<button type="button" class="sheetlink' + (s.name === cur.sheet ? ' on' : '') + '" data-snap="' + target + '" title="' + esc(s.name) + '">' + esc(s.name) +
+          (s.tabHit ? '<span class="muted small"> › ' + esc(s.tabHit.tab) + '</span>' : '') + '</button>';
+      }).join('')) + '</div>';
+  }).join('');
+  box.innerHTML = html || '<p class="muted small">No sheet or tab name matches “' + esc(S.sq) + '”.</p>';
+}
 function renderSheets() {
   var S = state.snap;
   if (!S.list) {
@@ -787,8 +828,8 @@ function renderSheets() {
   }
   if (!S.list.length) { $('view').innerHTML = '<div class="panel prose"><h3>Sheets</h3><p>No sheets have been copied in yet.</p></div>'; return; }
   var cur = S.list.filter(function (t) { return t.id === S.id; })[0] || S.list[0];
-  var sheets = [], seen = {};
-  S.list.forEach(function (t) { if (!seen[t.sheet]) { seen[t.sheet] = 1; sheets.push(t.sheet); } });
+  var nSheets = 0, seen = {};
+  S.list.forEach(function (t) { if (!seen[t.sheet]) { seen[t.sheet] = 1; nSheets++; } });
   var tabs = S.list.filter(function (t) { return t.sheet === cur.sheet; });
   var isNum = function (c) { return /^[\s(\-−]*[£$€]?\s*[\d,]+(\.\d+)?\s*(%|x)?\)?$/.test(c) && /\d/.test(c); };
   var needle = S.q.toLowerCase(), body;
@@ -811,13 +852,15 @@ function renderSheets() {
   $('view').innerHTML = '<div class="stack"><p class="small muted">' + (when
       ? '<span class="badge">REAL DATA</span> A read-only copy of the client’s sheet, taken ' + esc(when) + '. It does not change when the sheet changes; ask for a fresh copy.'
       : '<span class="badge warn">SAMPLE DATA</span> Invented content for the demo. Signed in, this tab shows copies of the real sheets.') + '</p>' +
-    '<div class="panel"><div class="panel-head"><div class="filters"><label class="small muted">Sheet <select id="snSheet">' +
-    sheets.map(function (s) { return '<option' + (s === cur.sheet ? ' selected' : '') + '>' + esc(s) + '</option>'; }).join('') + '</select></label>' +
-    '<input id="snQ" type="search" placeholder="Find in this tab" aria-label="Find in this tab" value="' + esc(S.q) + '"></div>' +
-    '<span class="small muted">' + num(cur.rows) + ' rows · ' + num(cur.cols) + ' columns</span></div>' +
+    '<div class="sheets-layout"><div class="panel sheets-nav"><input id="snFind" type="search" placeholder="Search ' + nSheets + ' sheets and their tabs" aria-label="Search sheets and tabs" value="' + esc(S.sq) + '">' +
+    '<div id="snList"></div></div>' +
+    '<div class="panel sheets-main"><div class="panel-head"><h3>' + esc(cur.sheet) + '</h3><div class="filters">' +
+    '<span class="small muted">' + num(cur.rows) + ' rows · ' + num(cur.cols) + ' columns</span>' +
+    '<input id="snQ" type="search" placeholder="Find in this tab" aria-label="Find in this tab" value="' + esc(S.q) + '"></div></div>' +
     '<div class="tabchips">' + tabs.map(function (t) {
       return '<button type="button" class="chip' + (t.id === cur.id ? ' on' : '') + '" data-snap="' + t.id + '" aria-pressed="' + (t.id === cur.id) + '">' + esc(t.tab) + '</button>';
-    }).join('') + '</div>' + body + '</div></div>';
+    }).join('') + '</div>' + body + '</div></div></div>';
+  fillSheetList();
 }
 
 function renderOrders() {
@@ -1018,7 +1061,7 @@ function load() {
 function start(p, who, mode) {
   provider = p; state.who = who; state.mode = mode;
   state.stack = []; state.f = { m: '', t: '', c: '' };
-  state.snap = { list: null, id: null, rows: null, q: '', loading: false }; state.funnel = null;
+  state.snap = { list: null, id: null, rows: null, q: '', sq: '', closed: {}, loading: false }; state.funnel = null;
   $('signin').hidden = true; $('app').hidden = false;
   $('who').textContent = who;
   $('signOut').textContent = mode === 'demo' ? 'Leave demo' : 'Sign out';
@@ -1049,6 +1092,7 @@ function act(t, e) {
     o.dir = o.sort === d.osort && o.dir === 'desc' ? 'asc' : 'desc'; o.sort = d.osort; o.page = 0; loadOrders();
   }
   else if (d.snap) { state.snap.q = ''; openSnap(+d.snap); }
+  else if (d.grp) { state.snap.closed[d.grp] = !state.snap.closed[d.grp]; fillSheetList(); }
   else if (d.day) zoom(d.day, d.day, 'orders');
   else if (d.go) go(d.go);
   else if (d.order) toggleOrder(d.order);
@@ -1115,6 +1159,10 @@ document.addEventListener('change', function (e) {
     var first = (state.snap.list || []).filter(function (t) { return t.sheet === v; })[0];
     if (first) { state.snap.q = ''; openSnap(first.id); }
   }
+});
+/* Searching the sheet list updates as you type, without redrawing the box you are typing in. */
+document.addEventListener('input', function (e) {
+  if (e.target.id === 'snFind') { state.snap.sq = e.target.value.trim(); fillSheetList(); }
 });
 window.addEventListener('hashchange', function () {
   if ($('app').hidden) return;
