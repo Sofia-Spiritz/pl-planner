@@ -41,6 +41,62 @@ function fmtDay(s, withYear) {
   return new Date(ms(s)).toLocaleDateString('en-GB', o);
 }
 function cssVar(name) { return 'var(' + name + ')'; }
+/* The actual colour behind a token, for the chart library (which cannot read CSS variables). */
+function cv(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+var ICONS = {
+  overview: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
+  funnel: '<path d="M3 4h18l-7 8v6l-4 2v-8z"/>',
+  sheets: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 4v16"/>',
+  markets: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.500 3 14.500 0 18M12 3c-3 3.500-3 14.500 0 18"/>',
+  threepl: '<path d="M3 8l9-5 9 5v8l-9 5-9-5z"/><path d="M3 8l9 5 9-5M12 13v8"/>',
+  collections: '<path d="M3 12V4h8l10 10-8 8z"/><circle cx="7.500" cy="7.500" r="1.200"/>',
+  orders: '<path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6"/>',
+  costs: '<circle cx="12" cy="12" r="9"/><path d="M9 15h6M9.500 15c1.500-1.500 1.500-3.500.500-5.500a2.600 2.600 0 0 1 4.800-1M8.500 12H13"/>',
+  marketing: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
+  notes: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.500v.500"/>'
+};
+function icon(key) { return '<svg viewBox="0 0 24 24" aria-hidden="true">' + (ICONS[key] || '') + '</svg>'; }
+
+/* A small trend line for a KPI tile. */
+function spark(vals, colorVar) {
+  if (!vals || vals.length < 2) return '';
+  var max = Math.max.apply(null, vals), min = Math.min.apply(null, vals), rng = (max - min) || 1;
+  var pts = vals.map(function (v, i) { return (i / (vals.length - 1) * 120).toFixed(1) + ',' + (27 - (v - min) / rng * 24).toFixed(1); });
+  return '<svg class="spark" viewBox="0 0 120 30" preserveAspectRatio="none" aria-hidden="true"><path d="M0,30 L' + pts.join(' L') + ' L120,30 Z" fill="' + cssVar(colorVar) +
+         '"/><polyline points="' + pts.join(' ') + '" stroke="' + cssVar(colorVar) + '"/></svg>';
+}
+
+/* Charts drawn with the ECharts library (loaded from a CDN). */
+function ecAxis() {
+  return { axisLine: { lineStyle: { color: cv('--line') } }, axisTick: { show: false }, axisLabel: { color: cv('--muted'), fontSize: 11 }, splitLine: { lineStyle: { color: cv('--line') } } };
+}
+function ec(id, option, onClick) {
+  var el = $(id); if (!el) return null;
+  if (!window.echarts) { el.innerHTML = '<div class="viz-msg">This chart could not load (the chart library was not reachable).</div>'; return null; }
+  var old = window.echarts.getInstanceByDom(el);     // a chart may already live in this box
+  if (old) { state.ecs = state.ecs.filter(function (x) { return x !== old; }); old.dispose(); }
+  el.innerHTML = '';
+  var c = window.echarts.init(el, null, { renderer: 'svg' });
+  option.textStyle = { fontFamily: 'Inter, "Segoe UI", sans-serif', color: cv('--muted') };
+  option.tooltip = Object.assign({ backgroundColor: cv('--tip-bg'), borderWidth: 0, textStyle: { color: cv('--tip-ink'), fontSize: 12 } }, option.tooltip || {});
+  if (option.legend) option.legend = Object.assign({ icon: 'roundRect', itemWidth: 10, itemHeight: 10, textStyle: { color: cv('--muted'), fontSize: 11 } }, option.legend);
+  c.setOption(option);
+  if (onClick) c.on('click', onClick);
+  state.ecs.push(c);
+  return c;
+}
+var worldReady = null;
+function worldMap() {
+  if (!window.echarts) return Promise.resolve(false);
+  if (!worldReady) {
+    worldReady = fetch('https://cdn.jsdelivr.net/npm/echarts@4.9.0/map/json/world.json')
+      .then(function (r) { if (!r.ok) throw new Error('map'); return r.json(); })
+      .then(function (j) { window.echarts.registerMap('world', j); return true; })
+      .catch(function () { worldReady = null; return false; });
+  }
+  return worldReady;
+}
 
 var COSTS = [
   { k: 'cogs', n: 'COGS (FIFO, landed)', c: '--c-cogs' },
@@ -69,6 +125,7 @@ var state = {
   f: { m: '', t: '', c: '' },          // filters: market, 3PL, collection
   stack: [],                           // earlier date ranges, for the Back button
   sort: {},                            // table sorts, by table key
+  ecs: [],                             // live ECharts instances, disposed on each redraw
   data: null, sync: [], funnel: null, snap: { list: null, id: null, rows: null, q: '', sq: '', closed: {}, loading: false }, hidden: {}, charts: {}, who: '', mode: '',
   ord: { page: 0, q: '', sort: 'order_date', dir: 'desc', open: null, rows: [], count: 0, lines: {}, loading: false }
 };
@@ -429,9 +486,9 @@ function delta(cur, prev, neutral) {
   var cls = neutral ? 'muted' : (ch >= 0 ? 'up' : 'down');
   return '<span class="' + cls + '">' + (ch >= 0 ? '▲ ' : '▼ ') + Math.abs(ch).toFixed(1) + '%</span> <span class="muted">vs previous</span>';
 }
-function kpi(label, value, sub, go) {
+function kpi(label, value, sub, go, extra) {
   return '<div class="kpi' + (go ? ' go' : '') + '"' + (go ? ' data-go="' + go + '" tabindex="0" role="link"' : '') + '><div class="k">' + esc(label) +
-         '</div><div class="v">' + value + '</div><div class="s">' + sub + '</div></div>';
+         '</div><div class="v">' + value + '</div><div class="s">' + sub + '</div>' + (extra || '') + '</div>';
 }
 function hbar(label, parts, total, valueText, attrs) {
   var fills = parts.map(function (p) {
@@ -692,10 +749,17 @@ function renderFunnel() {
     if (!byDay[b]) { byDay[b] = zero(); byDay[b].first = d; keys.push(b); }
     byDay[b].last = d;
   }
+  var dd = {}, dayKeys = [], byMB = {};
+  for (var d2 = state.from; d2 <= state.to; d2 = addDays(d2, 1)) { dd[d2] = zero(); dayKeys.push(d2); }
   daily.forEach(function (r) {
     add(tot, r); add(byM[r.market] = byM[r.market] || zero(), r);
-    if (byDay[bucketOf(r.day)]) add(byDay[bucketOf(r.day)], r);
+    var bk = bucketOf(r.day);
+    if (byDay[bk]) add(byDay[bk], r);
+    if (dd[r.day]) add(dd[r.day], r);
+    var mb = byMB[r.market] = byMB[r.market] || {};
+    add(mb[bk] = mb[bk] || zero(), r);
   });
+  var line = function (f) { return dayKeys.map(function (k) { return f(dd[k]); }); };
   var x = function (a, b) { return b ? (a / b).toFixed(2) + 'x' : '–'; };
   var when = F.meta.exported_at ? new Date(F.meta.exported_at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'unknown';
   var html = '<div class="stack"><p class="small muted">' + (F.meta.sample
@@ -706,17 +770,27 @@ function renderFunnel() {
     $('view').innerHTML = html + '<div class="panel"><p class="muted">No funnel figures for this period' + (fm ? ' and market' : '') + '. The 3PL and collection filters do not apply to this tab.</p></div></div>';
     return;
   }
-  html += '<div class="kpis">' +
-    kpi('Ad spend', money(tot.spend), pct(tot.spend, tot.net) + ' of net revenue') +
-    kpi('Shopify sales', money(tot.sales), 'inc. VAT') +
-    kpi('Net revenue', money(tot.net), 'ex VAT') +
-    kpi('Contribution after ads', money(tot.con), pct(tot.con, tot.net) + ' of net revenue') +
-    kpi('Blended ROAS', x(tot.sales, tot.spend), 'sales ÷ ad spend') +
-    kpi('New-customer ROAS', x(tot.nc, tot.spend), 'new-customer sales ÷ ad spend') +
-    kpi('New-customer share', pct(tot.nc, tot.sales), 'of Shopify sales') + '</div>';
-  html += '<div class="panel"><div class="panel-head"><h3>Sales, ad spend and contribution over time</h3>' + granPicker() + '</div><div id="chFunnel"></div></div>';
-
   var mk = Object.keys(byM).sort(function (a, b) { return byM[b].sales - byM[a].sales; });
+  html += '<div class="kpis">' +
+    kpi('Shopify sales', money(tot.sales), 'inc. VAT', null, spark(line(function (o) { return o.sales; }), '--c-rev')) +
+    kpi('Net revenue', money(tot.net), 'ex VAT', null, spark(line(function (o) { return o.net; }), '--c-ship')) +
+    kpi('Ad spend', money(tot.spend), pct(tot.spend, tot.net) + ' of net revenue', null, spark(line(function (o) { return o.spend; }), '--c-con')) +
+    kpi('Contribution after ads', money(tot.con), pct(tot.con, tot.net) + ' of net revenue', null, spark(line(function (o) { return o.con; }), '--c-gp')) +
+    kpi('Blended ROAS', x(tot.sales, tot.spend), 'sales ÷ ad spend', null, spark(line(function (o) { return ratio(o.sales, o.spend); }), '--c-pp')) +
+    kpi('New-customer share', pct(tot.nc, tot.sales), 'ROAS on new customers ' + x(tot.nc, tot.spend), null, spark(line(function (o) { return ratio(o.nc, o.sales); }), '--c-np')) + '</div>';
+
+  var bestPct = Math.max.apply(null, mk.map(function (m) { return ratio(byM[m].con, byM[m].net); }).concat([0.0001]));
+  html += '<div class="grid g3">' +
+    '<div class="panel"><div class="panel-head"><h3>Ad spend by platform</h3></div><div id="vzDonut" class="viz"></div></div>' +
+    '<div class="panel"><div class="panel-head"><h3>Sales by market</h3><span class="small muted">bubble size = sales · select one to filter</span></div><div id="vzMap" class="viz"><div class="viz-msg">Loading the map…</div></div></div>' +
+    '<div class="panel"><div class="panel-head"><h3>Contribution margin by market</h3></div><div class="rank">' + mk.map(function (m) {
+      var r = byM[m], p = ratio(r.con, r.net);
+      return '<div class="r"><b>' + esc(nameOf('markets', m)) + '</b><span>' + pct(r.con, r.net) + '</span><span class="bar"><i style="width:' + Math.max(0, p / bestPct * 100).toFixed(1) + '%"></i></span>' +
+             '<span class="small muted">' + money(r.con) + ' on ' + money(r.net) + ' net revenue</span><span class="small muted">ROAS ' + x(r.sales, r.spend) + '</span></div>';
+    }).join('') + '</div></div></div>';
+  html += '<div class="panel"><div class="panel-head"><h3>Sales by market, with ad spend and contribution</h3>' + granPicker() + '</div><div id="vzTrend" class="viz tall"></div>' +
+    '<p class="note">Select a bar to zoom in to that day, week or month.</p></div>';
+
   html += '<div class="panel"><div class="panel-head"><h3>By market</h3><span class="small muted">select a market to filter the dashboard</span></div><div class="scroll"><table><thead><tr><th>Market</th><th>Meta</th><th>Google</th><th>AppLovin</th><th>Ad spend</th><th>Shopify sales</th><th>Net revenue</th><th>Contribution</th><th>Contr %</th><th>ROAS</th><th>New-cust ROAS</th></tr></thead><tbody>' +
     mk.map(function (m) {
       var r = byM[m];
@@ -733,7 +807,7 @@ function renderFunnel() {
   var cats = Object.keys(cat).map(function (k) { return cat[k]; }).sort(function (a, b) { return (b.nw + b.ret) - (a.nw + a.ret); });
   var catSpend = cats.reduce(function (s, c) { return s + c.spend; }, 0);
   html += '<div class="grid g2"><div class="panel"><div class="panel-head"><h3>Bags vs glasses cases</h3><span class="small muted">ad spend matched to a product category</span></div>' + (cats.length
-    ? '<div class="scroll"><table><thead><tr><th>Market</th><th class="l">Category</th><th>Ad spend</th><th>New-cust sales</th><th>Returning sales</th><th>ROAS</th></tr></thead><tbody>' +
+    ? '<div id="vzCat" class="viz"></div><div class="scroll"><table><thead><tr><th>Market</th><th class="l">Category</th><th>Ad spend</th><th>New-cust sales</th><th>Returning sales</th><th>ROAS</th></tr></thead><tbody>' +
       cats.map(function (c) {
         return '<tr><td>' + esc(c.market) + '</td><td class="l">' + esc(c.category) + '</td><td>' + money(c.spend) + '</td><td>' + money(c.nw) + '</td><td>' + money(c.ret) + '</td><td>' + x(c.nw + c.ret, c.spend) + '</td></tr>';
       }).join('') + '</tbody></table></div><p class="note">Spend matched to a category here is ' + money(catSpend) + ' of ' + money(tot.spend) + ' total ad spend (' + pct(catSpend, tot.spend) +
@@ -765,11 +839,63 @@ function renderFunnel() {
     o.tip = state.gran === 'day' ? fmtDay(k, true) : state.gran === 'week' ? fmtDay(o.first) + ' to ' + fmtDay(o.last, true) : o.label;
     return o;
   });
-  drawChart('chFunnel', s, [
-    { name: 'Shopify sales', type: 'bar', color: '--c-rev', values: s.map(function (o) { return o.sales; }) },
-    { name: 'Ad spend', type: 'line', color: '--c-mkt', values: s.map(function (o) { return o.spend; }) },
-    { name: 'Contribution after ads', type: 'line', color: '--c-gp', values: s.map(function (o) { return o.con; }) }
-  ], money);
+  var MC = { UK: '--c-rev', US: '--c-gp', AU: '--c-np' }, ax = ecAxis();
+  var moneyAxis = Object.assign({}, ax, { type: 'value', axisLabel: { color: cv('--muted'), fontSize: 11, formatter: function (v) { return money(v); } } });
+  var grid = { left: 6, right: 10, top: 40, bottom: 4, containLabel: true };
+
+  /* Donut: where the ad money went. */
+  ec('vzDonut', {
+    tooltip: { trigger: 'item', valueFormatter: money },
+    title: { text: money(tot.spend), subtext: 'total ad spend', left: 'center', top: '34%', textStyle: { color: cv('--ink'), fontSize: 20, fontWeight: 700 }, subtextStyle: { color: cv('--muted'), fontSize: 11 } },
+    legend: { bottom: 0, icon: 'circle' },
+    series: [{ type: 'pie', radius: ['56%', '78%'], center: ['50%', '44%'], label: { show: false }, itemStyle: { borderColor: cv('--panel'), borderWidth: 3, borderRadius: 6 },
+      data: [['Meta', tot.meta, '--c-rev'], ['Google', tot.google, '--c-gp'], ['AppLovin', tot.app, '--c-con']]
+        .filter(function (p) { return p[1] > 0; }).map(function (p) { return { name: p[0], value: r2(p[1]), itemStyle: { color: cv(p[2]) } }; }) }]
+  });
+
+  /* Stacked bars by market, with ad spend and contribution as lines. */
+  ec('vzTrend', {
+    tooltip: { trigger: 'axis', valueFormatter: money }, legend: { top: 0 }, grid: grid,
+    xAxis: Object.assign({}, ax, { type: 'category', data: s.map(function (o) { return o.label; }) }), yAxis: moneyAxis,
+    series: mk.map(function (m) {
+      return { name: nameOf('markets', m), type: 'bar', stack: 'sales', barMaxWidth: 28, itemStyle: { color: cv(MC[m] || '--c-opex') },
+               data: keys.map(function (k) { return r2(((byMB[m] || {})[k] || { sales: 0 }).sales); }) };
+    }).concat([
+      { name: 'Ad spend', type: 'line', smooth: true, symbol: 'none', lineStyle: { width: 2.5 }, itemStyle: { color: cv('--c-con') }, data: s.map(function (o) { return r2(o.spend); }) },
+      { name: 'Contribution after ads', type: 'line', smooth: true, symbol: 'none', lineStyle: { width: 2.5 }, itemStyle: { color: cv('--c-cogs') }, data: s.map(function (o) { return r2(o.con); }) }
+    ])
+  }, function (p) {
+    var b = s[p.dataIndex];
+    if (b && !(b.first === state.from && b.last === state.to)) zoom(b.first, b.last);
+  });
+
+  /* Bags vs glasses cases, market by market. */
+  if (cats.length) ec('vzCat', {
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, valueFormatter: money }, legend: { top: 0 }, grid: grid,
+    xAxis: Object.assign({}, ax, { type: 'category', data: cats.map(function (c) { return c.market + ' ' + c.category; }), axisLabel: { color: cv('--muted'), fontSize: 10, interval: 0 } }), yAxis: moneyAxis,
+    series: [
+      { name: 'New-customer sales', type: 'bar', stack: 's', barMaxWidth: 34, itemStyle: { color: cv('--c-gp') }, data: cats.map(function (c) { return r2(c.nw); }) },
+      { name: 'Returning sales', type: 'bar', stack: 's', barMaxWidth: 34, itemStyle: { color: cv('--c-ship') }, data: cats.map(function (c) { return r2(c.ret); }) },
+      { name: 'Ad spend', type: 'bar', barMaxWidth: 14, itemStyle: { color: cv('--c-con') }, data: cats.map(function (c) { return r2(c.spend); }) }
+    ]
+  });
+
+  /* World map with a bubble per market. */
+  var GEO = { UK: ['United Kingdom', -2, 54], US: ['United States', -98, 39], AU: ['Australia', 134, -25] };
+  var maxSales = Math.max.apply(null, mk.map(function (m) { return byM[m].sales; }).concat([1]));
+  worldMap().then(function (ok) {
+    if (state.tab !== 'funnel' || !$('vzMap')) return;
+    if (!ok) { $('vzMap').innerHTML = '<div class="viz-msg">The map could not load. The figures are in the table below.</div>'; return; }
+    ec('vzMap', {
+      tooltip: { trigger: 'item', formatter: function (p) { return p.data ? '<b>' + esc(p.name) + '</b><br>Sales ' + money(p.value[2]) + '<br>Ad spend ' + money(p.data.spend) + '<br>Contribution ' + money(p.data.con) : ''; } },
+      geo: { map: 'world', roam: false, silent: true, top: 6, bottom: 6, left: 0, right: 0, itemStyle: { areaColor: cv('--panel2'), borderColor: cv('--line') } },
+      series: [{ type: 'scatter', coordinateSystem: 'geo',
+        data: mk.filter(function (m) { return GEO[m]; }).map(function (m) { return { name: GEO[m][0], value: [GEO[m][1], GEO[m][2], r2(byM[m].sales)], spend: byM[m].spend, con: byM[m].con, market: m, label: { position: GEO[m][1] > 60 ? 'left' : 'right' } }; }),
+        symbolSize: function (v) { return 14 + 44 * Math.sqrt(v[2] / maxSales); },
+        itemStyle: { color: cv('--c-con'), opacity: .78, borderColor: cv('--panel'), borderWidth: 2 },
+        label: { show: true, position: 'right', color: cv('--ink'), fontSize: 11, fontWeight: 600, formatter: function (p) { return p.name + '  ' + money(p.value[2]); } } }]
+    }, function (p) { if (p.data && p.data.market) setFilter('m', p.data.market); });
+  });
 }
 
 /* Sheets: copies of the client's sheets, shown tab by tab as they look in the sheet. Read-only. */
@@ -807,7 +933,7 @@ function fillSheetList() {
   });
   var groups = {}, names = SHEET_GROUPS.map(function (g) { return g[0]; }).concat(['Other']);
   order.forEach(function (s) { if (s.hit || s.tabHit) (groups[sheetGroup(s.name)] = groups[sheetGroup(s.name)] || []).push(s); });
-  var html = names.filter(function (g) { return groups[g]; }).map(function (g) {
+  var html = names.filter(function (g) { return groups[g] && (needle || !S.stage || g === S.stage); }).map(function (g) {
     var list = groups[g].sort(function (a, b) { return a.name.localeCompare(b.name, 'en', { numeric: true }); });
     var closed = !needle && S.closed[g] && sheetGroup(cur.sheet) !== g;
     return '<div class="grp"><button type="button" class="grp-head" data-grp="' + esc(g) + '" aria-expanded="' + (!closed) + '">' + (closed ? '▸ ' : '▾ ') + esc(g) +
@@ -828,8 +954,14 @@ function renderSheets() {
   }
   if (!S.list.length) { $('view').innerHTML = '<div class="panel prose"><h3>Sheets</h3><p>No sheets have been copied in yet.</p></div>'; return; }
   var cur = S.list.filter(function (t) { return t.id === S.id; })[0] || S.list[0];
-  var nSheets = 0, seen = {};
-  S.list.forEach(function (t) { if (!seen[t.sheet]) { seen[t.sheet] = 1; nSheets++; } });
+  var nSheets = 0, seen = {}, perGroup = {};
+  S.list.forEach(function (t) { if (!seen[t.sheet]) { seen[t.sheet] = 1; nSheets++; var g = sheetGroup(t.sheet); perGroup[g] = (perGroup[g] || 0) + 1; } });
+  /* The stages a product moves through. Each one narrows the list to its sheets. */
+  var flow = '<div class="flow" role="group" aria-label="Supply chain stages">' +
+    ['Suppliers', 'Purchase orders', 'Stock and supply', 'Shipping and tariffs', 'Finance and margins', 'Forecasts'].map(function (g) {
+      return '<button type="button" class="stage' + (S.stage === g ? ' on' : '') + '" data-stage="' + esc(g) + '" aria-pressed="' + (S.stage === g) + '"><span class="n">' + (perGroup[g] || 0) +
+             '</span><span class="l">' + esc(g) + '</span></button>';
+    }).join('') + '</div>';
   var tabs = S.list.filter(function (t) { return t.sheet === cur.sheet; });
   var isNum = function (c) { return /^[\s(\-−]*[£$€]?\s*[\d,]+(\.\d+)?\s*(%|x)?\)?$/.test(c) && /\d/.test(c); };
   var needle = S.q.toLowerCase(), body;
@@ -852,7 +984,7 @@ function renderSheets() {
   $('view').innerHTML = '<div class="stack"><p class="small muted">' + (when
       ? '<span class="badge">REAL DATA</span> A read-only copy of the client’s sheet, taken ' + esc(when) + '. It does not change when the sheet changes; ask for a fresh copy.'
       : '<span class="badge warn">SAMPLE DATA</span> Invented content for the demo. Signed in, this tab shows copies of the real sheets.') + '</p>' +
-    '<div class="sheets-layout"><div class="panel sheets-nav"><input id="snFind" type="search" placeholder="Search ' + nSheets + ' sheets and their tabs" aria-label="Search sheets and tabs" value="' + esc(S.sq) + '">' +
+    flow + '<div class="sheets-layout"><div class="panel sheets-nav"><input id="snFind" type="search" placeholder="Search ' + nSheets + ' sheets and their tabs" aria-label="Search sheets and tabs" value="' + esc(S.sq) + '">' +
     '<div id="snList"></div></div>' +
     '<div class="panel sheets-main"><div class="panel-head"><h3>' + esc(cur.sheet) + '</h3><div class="filters">' +
     '<span class="small muted">' + num(cur.rows) + ' rows · ' + num(cur.cols) + ' columns</span>' +
@@ -981,7 +1113,7 @@ function render() {
   state.tab = title[0];
   $('tabTitle').textContent = title[1];
   $('tabs').innerHTML = shown.map(function (t) {
-    return '<a href="#' + t[0] + '" class="' + (t[0] === state.tab ? 'on' : '') + '"' + (t[0] === state.tab ? ' aria-current="page"' : '') + '>' + t[1] + '</a>';
+    return '<a href="#' + t[0] + '" class="' + (t[0] === state.tab ? 'on' : '') + '"' + (t[0] === state.tab ? ' aria-current="page"' : '') + '>' + icon(t[0]) + '<span>' + t[1] + '</span></a>';
   }).join('');
   $('presets').innerHTML = PRESETS.map(function (p) {
     return '<button type="button" data-preset="' + p[0] + '" class="' + (state.preset === p[0] ? 'on' : '') + '">' + p[1] + '</button>';
@@ -997,6 +1129,9 @@ function render() {
   $('demoBadge').hidden = state.mode !== 'demo';
   renderFilters();
   state.charts = {};
+  state.ecs.forEach(function (c) { try { c.dispose(); } catch (e) {} });
+  state.ecs = [];
+  $('themeBtn').textContent = document.documentElement.getAttribute('data-theme') === 'dark' ? 'Light mode' : 'Dark mode';
   if (state.tab === 'overview') renderOverview();
   else if (state.tab === 'funnel') renderFunnel();
   else if (state.tab === 'sheets') renderSheets();
@@ -1093,6 +1228,13 @@ function act(t, e) {
   }
   else if (d.snap) { state.snap.q = ''; openSnap(+d.snap); }
   else if (d.grp) { state.snap.closed[d.grp] = !state.snap.closed[d.grp]; fillSheetList(); }
+  else if (d.stage) { state.snap.stage = state.snap.stage === d.stage ? '' : d.stage; state.snap.sq = ''; renderSheets(); }
+  else if (t.id === 'themeBtn') {
+    var dark = document.documentElement.getAttribute('data-theme') === 'dark';
+    if (dark) document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', 'dark');
+    try { localStorage.setItem('pl-theme', dark ? 'light' : 'dark'); } catch (err) {}
+    if (state.data) render();
+  }
   else if (d.day) zoom(d.day, d.day, 'orders');
   else if (d.go) go(d.go);
   else if (d.order) toggleOrder(d.order);
