@@ -126,6 +126,20 @@ svg.chart .hl { fill: var(--ink); opacity: .07; pointer-events: none; }
 .tip i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
 #filters:empty { display: none; }
 
+/* Sheets tab */
+.tabchips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.chip { background: var(--panel2); border: 1px solid var(--line); border-radius: 999px; padding: 3px 11px; cursor: pointer; font-size: 12px; color: var(--muted); }
+.chip:hover { color: var(--ink); border-color: var(--muted); }
+.chip.on { background: var(--accent); border-color: var(--accent); color: #0d1117; font-weight: 600; }
+.sheet-scroll { max-height: 70vh; overflow: auto; border: 1px solid var(--line); border-radius: 6px; }
+table.sheet { width: auto; min-width: 100%; }
+table.sheet td { white-space: normal; text-align: left; vertical-align: top; max-width: 460px; min-width: 60px; overflow-wrap: anywhere; font-size: 12px; }
+table.sheet td.n { text-align: right; white-space: nowrap; }
+table.sheet td:first-child { position: sticky; left: 0; background: var(--panel); min-width: 180px; font-weight: 500; }
+table.sheet tr.sect td { background: var(--panel2); font-weight: 700; position: static; }
+table.sheet tr.gap td { height: 10px; border-top: 0; padding: 0; }
+table.sheet tr:hover td { background: var(--panel2); }
+
 .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .pager { display: flex; gap: 8px; align-items: center; justify-content: flex-end; margin-top: 10px; }
 .prose { max-width: 78ch; display: flex; flex-direction: column; gap: 8px; }

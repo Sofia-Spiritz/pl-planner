@@ -49,7 +49,7 @@ var COSTS = [
   { k: 'fee',  n: 'Payment fees',        c: '--c-fee' }
 ];
 var TABS = [
-  ['overview', 'Overview'], ['funnel', 'Marketing funnel'], ['markets', 'By market'], ['threepl', 'By 3PL'], ['collections', 'By collection'],
+  ['overview', 'Overview'], ['funnel', 'Marketing funnel'], ['sheets', 'Sheets'], ['markets', 'By market'], ['threepl', 'By 3PL'], ['collections', 'By collection'],
   ['orders', 'Orders'], ['costs', 'Costs'], ['marketing', 'Marketing & OPEX'], ['notes', 'Data notes']
 ];
 var PRESETS = [
@@ -63,7 +63,7 @@ var state = {
   f: { m: '', t: '', c: '' },          // filters: market, 3PL, collection
   stack: [],                           // earlier date ranges, for the Back button
   sort: {},                            // table sorts, by table key
-  data: null, sync: [], funnel: null, hidden: {}, charts: {}, who: '', mode: '',
+  data: null, sync: [], funnel: null, snap: { list: null, id: null, rows: null, q: '', loading: false }, hidden: {}, charts: {}, who: '', mode: '',
   ord: { page: 0, q: '', sort: 'order_date', dir: 'desc', open: null, rows: [], count: 0, lines: {}, loading: false }
 };
 var sb = null, provider = null;
@@ -202,6 +202,23 @@ function demoProvider() {
       return Promise.resolve(o ? o.lines : []);
     },
     sync: function () { return Promise.resolve([]); },
+    /* Two invented tabs, so the Sheets tab can be seen in the demo. */
+    snapList: function () {
+      return Promise.resolve([
+        { id: 1, sheet: 'Sample sheet (invented)', tab: 'Monthly P&L', copied_at: null, rows: 9, cols: 4 },
+        { id: 2, sheet: 'Sample sheet (invented)', tab: 'Fixes list', copied_at: null, rows: 4, cols: 4 }
+      ]);
+    },
+    snapTab: function (id) {
+      return Promise.resolve(id === 1 ? [
+        ['Sample monthly P&L'], ['Invented numbers, for the demo only.'], [],
+        ['£', 'Sep 26', 'Oct 26', 'Nov 26'], ['Revenue'], ['Net revenue', '£120,400', '£134,900', '£141,250'],
+        ['Product cost', '-£31,300', '-£35,100', '-£36,700'], ['Gross profit', '£89,100', '£99,800', '£104,550'], ['Gross margin', '74.0%', '74.0%', '74.0%']
+      ] : [
+        ['#', 'Priority', 'What we found', 'Status'], ['1', 'High', 'Sample: duty invoices booked under postage', 'Open'],
+        ['2', 'Medium', 'Sample: supplier payment coded to the wrong account', 'Asked'], ['3', 'Low', 'Sample: one month booked late', 'Done']
+      ]);
+    },
     /* Invented funnel figures in the same shape as the real ones, so the tab can be seen in the demo. */
     funnel: function (from, to) {
       var day = {}, cat = {}, MK = { UK: 1, US: 1, AU: 1 };
@@ -262,6 +279,13 @@ function sbProvider() {
     /* Which live sheets feed the database and when each last synced. */
     sync: function () {
       return sb.rpc('sync_status').then(function (res) { return res.error ? [] : (res.data || []); }, function () { return []; });
+    },
+    /* Copies of whole sheet tabs, shown as they look in the sheet. */
+    snapList: function () {
+      return sb.rpc('snap_list').then(function (res) { return res.error ? [] : (res.data || []); }, function () { return []; });
+    },
+    snapTab: function (id) {
+      return sb.rpc('snap_tab', { p_id: id }).then(function (res) { if (res.error) throw new Error(res.error.message); return res.data || []; });
     },
     /* Real figures from the client's Daily Funnel Sheet. */
     funnel: function (from, to) {
@@ -740,6 +764,56 @@ function renderFunnel() {
   ], money);
 }
 
+/* Sheets: copies of the client's sheets, shown tab by tab as they look in the sheet. Read-only. */
+function openSnap(id) {
+  var S = state.snap; S.id = id; S.rows = null; S.loading = true;
+  if (state.tab === 'sheets') renderSheets();
+  provider.snapTab(id).then(function (rows) { if (S.id === id) S.rows = rows || []; })
+    .catch(function (e) { S.rows = []; setStatus('Could not load that tab: ' + e.message); })
+    .then(function () { S.loading = false; if (state.tab === 'sheets') renderSheets(); });
+}
+function renderSheets() {
+  var S = state.snap;
+  if (!S.list) {
+    $('view').innerHTML = '<div class="panel"><p class="muted">Loading the list of sheets…</p></div>';
+    provider.snapList().then(function (l) { S.list = l || []; if (S.list.length && S.id == null) openSnap(S.list[0].id); else if (state.tab === 'sheets') renderSheets(); });
+    return;
+  }
+  if (!S.list.length) { $('view').innerHTML = '<div class="panel prose"><h3>Sheets</h3><p>No sheets have been copied in yet.</p></div>'; return; }
+  var cur = S.list.filter(function (t) { return t.id === S.id; })[0] || S.list[0];
+  var sheets = [], seen = {};
+  S.list.forEach(function (t) { if (!seen[t.sheet]) { seen[t.sheet] = 1; sheets.push(t.sheet); } });
+  var tabs = S.list.filter(function (t) { return t.sheet === cur.sheet; });
+  var isNum = function (c) { return /^[\s(\-−]*[£$€]?\s*[\d,]+(\.\d+)?\s*(%|x)?\)?$/.test(c) && /\d/.test(c); };
+  var needle = S.q.toLowerCase(), body;
+  if (S.loading || !S.rows) body = '<p class="muted">Loading…</p>';
+  else {
+    var shown = 0, width = S.rows.reduce(function (m, r) { return Math.max(m, r.length); }, 0);
+    var trs = S.rows.map(function (r) {
+      if (!r.length) return needle ? '' : '<tr class="gap"><td colspan="' + width + '"></td></tr>';
+      if (needle && r.join(' ').toLowerCase().indexOf(needle) < 0) return '';
+      shown++;
+      var filled = r.filter(function (c) { return c !== ''; }).length;
+      if (filled === 1 && r[0] !== '') return '<tr class="sect"><td colspan="' + width + '">' + esc(r[0]) + '</td></tr>';
+      var cells = '';
+      for (var i = 0; i < width; i++) { var c = r[i] == null ? '' : r[i]; cells += '<td class="' + (isNum(c) ? 'n' : 't') + '">' + esc(c) + '</td>'; }
+      return '<tr>' + cells + '</tr>';
+    }).join('');
+    body = shown ? '<div class="scroll sheet-scroll"><table class="sheet">' + trs + '</table></div>' : '<p class="muted">Nothing in this tab matches “' + esc(S.q) + '”.</p>';
+  }
+  var when = cur.copied_at ? new Date(cur.copied_at).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : null;
+  $('view').innerHTML = '<div class="stack"><p class="small muted">' + (when
+      ? '<span class="badge">REAL DATA</span> A read-only copy of the client’s sheet, taken ' + esc(when) + '. It does not change when the sheet changes; ask for a fresh copy.'
+      : '<span class="badge warn">SAMPLE DATA</span> Invented content for the demo. Signed in, this tab shows copies of the real sheets.') + '</p>' +
+    '<div class="panel"><div class="panel-head"><div class="filters"><label class="small muted">Sheet <select id="snSheet">' +
+    sheets.map(function (s) { return '<option' + (s === cur.sheet ? ' selected' : '') + '>' + esc(s) + '</option>'; }).join('') + '</select></label>' +
+    '<input id="snQ" type="search" placeholder="Find in this tab" aria-label="Find in this tab" value="' + esc(S.q) + '"></div>' +
+    '<span class="small muted">' + num(cur.rows) + ' rows · ' + num(cur.cols) + ' columns</span></div>' +
+    '<div class="tabchips">' + tabs.map(function (t) {
+      return '<button type="button" class="chip' + (t.id === cur.id ? ' on' : '') + '" data-snap="' + t.id + '" aria-pressed="' + (t.id === cur.id) + '">' + esc(t.tab) + '</button>';
+    }).join('') + '</div>' + body + '</div></div>';
+}
+
 function renderOrders() {
   var o = state.ord, body;
   var head = function (col, label, cls) {
@@ -870,6 +944,7 @@ function render() {
   state.charts = {};
   if (state.tab === 'overview') renderOverview();
   else if (state.tab === 'funnel') renderFunnel();
+  else if (state.tab === 'sheets') renderSheets();
   else if (state.tab === 'markets') renderDim('m', 'by market', 'markets');
   else if (state.tab === 'threepl') renderDim('t', 'by 3PL', 'threepls');
   else if (state.tab === 'collections') renderDim('c', 'by collection', null);
@@ -931,6 +1006,7 @@ function load() {
 function start(p, who, mode) {
   provider = p; state.who = who; state.mode = mode;
   state.stack = []; state.f = { m: '', t: '', c: '' };
+  state.snap = { list: null, id: null, rows: null, q: '', loading: false }; state.funnel = null;
   $('signin').hidden = true; $('app').hidden = false;
   $('who').textContent = who;
   $('signOut').textContent = mode === 'demo' ? 'Leave demo' : 'Sign out';
@@ -960,6 +1036,7 @@ function act(t, e) {
     var o = state.ord;
     o.dir = o.sort === d.osort && o.dir === 'desc' ? 'asc' : 'desc'; o.sort = d.osort; o.page = 0; loadOrders();
   }
+  else if (d.snap) { state.snap.q = ''; openSnap(+d.snap); }
   else if (d.day) zoom(d.day, d.day, 'orders');
   else if (d.go) go(d.go);
   else if (d.order) toggleOrder(d.order);
@@ -1021,6 +1098,11 @@ document.addEventListener('change', function (e) {
   else if (id === 'fT') { state.f.t = v; state.ord.page = 0; render(); loadOrders(); }
   else if (id === 'fC') { state.f.c = v; render(); }
   else if (id === 'oQ') { state.ord.q = v.trim(); state.ord.page = 0; loadOrders(); }
+  else if (id === 'snQ') { state.snap.q = v.trim(); renderSheets(); }
+  else if (id === 'snSheet') {
+    var first = (state.snap.list || []).filter(function (t) { return t.sheet === v; })[0];
+    if (first) { state.snap.q = ''; openSnap(first.id); }
+  }
 });
 window.addEventListener('hashchange', function () {
   if ($('app').hidden) return;
