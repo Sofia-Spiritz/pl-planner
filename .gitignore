@@ -11,6 +11,10 @@ dist/
 supabase/seeds/00_private_users.sql
 # Live sheet addresses
 supabase/seeds/02_private_sheets.sql
+# Real client figures
+supabase/seeds/*_private_*.sql
+/data/
+*.private.*
 # Key files must never be committed
 *service-account*.json
 pl-planner-sync*.json

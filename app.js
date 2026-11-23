@@ -49,7 +49,7 @@ var COSTS = [
   { k: 'fee',  n: 'Payment fees',        c: '--c-fee' }
 ];
 var TABS = [
-  ['overview', 'Overview'], ['markets', 'By market'], ['threepl', 'By 3PL'], ['collections', 'By collection'],
+  ['overview', 'Overview'], ['funnel', 'Marketing funnel'], ['markets', 'By market'], ['threepl', 'By 3PL'], ['collections', 'By collection'],
   ['orders', 'Orders'], ['costs', 'Costs'], ['marketing', 'Marketing & OPEX'], ['notes', 'Data notes']
 ];
 var PRESETS = [
@@ -63,7 +63,7 @@ var state = {
   f: { m: '', t: '', c: '' },          // filters: market, 3PL, collection
   stack: [],                           // earlier date ranges, for the Back button
   sort: {},                            // table sorts, by table key
-  data: null, sync: [], hidden: {}, charts: {}, who: '', mode: '',
+  data: null, sync: [], funnel: null, hidden: {}, charts: {}, who: '', mode: '',
   ord: { page: 0, q: '', sort: 'order_date', dir: 'desc', open: null, rows: [], count: 0, lines: {}, loading: false }
 };
 var sb = null, provider = null;
@@ -201,7 +201,40 @@ function demoProvider() {
       var o = orders.filter(function (x) { return x.id === id; })[0];
       return Promise.resolve(o ? o.lines : []);
     },
-    sync: function () { return Promise.resolve([]); }
+    sync: function () { return Promise.resolve([]); },
+    /* Invented funnel figures in the same shape as the real ones, so the tab can be seen in the demo. */
+    funnel: function (from, to) {
+      var day = {}, cat = {}, MK = { UK: 1, US: 1, AU: 1 };
+      orders.forEach(function (o) {
+        if (o.d < from || o.d > to || !MK[o.m]) return;
+        var k = o.d + '|' + o.m, r = day[k] = day[k] || { day: o.d, market: o.m, meta_spend: 0, google_spend: 0, applovin_spend: 0, ad_spend: 0, shopify_sales: 0, new_customer_sales: 0, net_revenue: 0, contribution: 0 };
+        o.lines.forEach(function (l) {
+          r.shopify_sales += l.revenue; r.new_customer_sales += l.revenue * 0.82; r.net_revenue += l.revenue - l.tax;
+          r.contribution += l.revenue - l.tax - l.cogs - l.pick_pack - l.shipping - l.payment_fee;
+          var c = l.skus.collection === 'Glasses cases' ? 'Glasses cases' : l.skus.collection === 'Bags' ? 'Bags' : null;
+          if (!c) return;
+          var ck = k + '|' + c, x = cat[ck] = cat[ck] || { day: o.d, market: o.m, category: c, meta_spend: 0, google_spend: 0, applovin_spend: 0, new_sales: 0, returning_sales: 0 };
+          x.new_sales += l.revenue * 0.82; x.returning_sales += l.revenue * 0.18;
+        });
+      });
+      ads.forEach(function (a) {
+        var r = day[a.d + '|' + a.m]; if (!r) return;
+        var f = a.p === 'Meta' ? 'meta_spend' : a.p === 'Google' ? 'google_spend' : 'applovin_spend';
+        r[f] += a.s; r.ad_spend += a.s; r.contribution -= a.s;
+        ['Bags', 'Glasses cases'].forEach(function (c, i) { var x = cat[a.d + '|' + a.m + '|' + c]; if (x) x[f] += a.s * (i ? 0.2 : 0.7); });
+      });
+      var costs = [];
+      opex.forEach(function (x) {
+        if (x.cat === 'Software' && x.month <= to && monthEnd(x.month) >= from) {
+          [['Sample store platform', 0.45], ['Sample email tool', 0.3], ['Sample reporting tool', 0.25]].forEach(function (i) { costs.push({ month: x.month, item: i[0], amount: r2(x.amt * i[1]), currency: 'GBP', is_total: false }); });
+          costs.push({ month: x.month, item: 'TOTAL', amount: x.amt, currency: 'GBP', is_total: true });
+        }
+      });
+      return Promise.resolve({
+        daily: Object.keys(day).map(function (k) { return day[k]; }), category: Object.keys(cat).map(function (k) { return cat[k]; }),
+        monthly: [], costs: costs, meta: { sample: true, source: 'sample generator', exported_at: null, min: meta.min, max: meta.max }
+      });
+    }
   };
 }
 
@@ -229,6 +262,10 @@ function sbProvider() {
     /* Which live sheets feed the database and when each last synced. */
     sync: function () {
       return sb.rpc('sync_status').then(function (res) { return res.error ? [] : (res.data || []); }, function () { return []; });
+    },
+    /* Real figures from the client's Daily Funnel Sheet. */
+    funnel: function (from, to) {
+      return sb.rpc('funnel_data', { p_from: from, p_to: to }).then(function (res) { return res.error ? null : res.data; }, function () { return null; });
     },
     /* Ask the database to read the live sheets right now instead of waiting for the schedule. */
     syncNow: function () {
@@ -600,6 +637,109 @@ function renderMarketing() {
   $('view').innerHTML = html;
 }
 
+/* Marketing funnel: real figures from the client's Daily Funnel Sheet (not sample data). */
+function renderFunnel() {
+  var F = state.funnel, fm = state.f.m;
+  if (!F) {
+    $('view').innerHTML = '<div class="panel prose"><h3>Marketing funnel</h3><p>' + (state.mode === 'demo'
+      ? 'This tab shows real figures from the Daily Funnel Sheet, so it is not part of the demo. Sign in to see it.'
+      : 'No funnel figures are available. They may still be loading, or none have been loaded yet.') + '</p></div>';
+    return;
+  }
+  var N = function (v) { return +v || 0; };
+  var daily = F.daily.filter(function (r) { return !fm || r.market === fm; });
+  var tot = { spend: 0, meta: 0, google: 0, app: 0, sales: 0, nc: 0, net: 0, con: 0 }, byM = {}, byDay = {}, keys = [];
+  var add = function (o, r) {
+    o.meta += N(r.meta_spend); o.google += N(r.google_spend); o.app += N(r.applovin_spend);
+    o.spend += r.ad_spend != null ? N(r.ad_spend) : N(r.meta_spend) + N(r.google_spend) + N(r.applovin_spend);
+    o.sales += N(r.shopify_sales); o.nc += N(r.new_customer_sales); o.net += N(r.net_revenue); o.con += N(r.contribution);
+  };
+  var zero = function () { return { spend: 0, meta: 0, google: 0, app: 0, sales: 0, nc: 0, net: 0, con: 0 }; };
+  for (var d = state.from; d <= state.to; d = addDays(d, 1)) {
+    var b = bucketOf(d);
+    if (!byDay[b]) { byDay[b] = zero(); byDay[b].first = d; keys.push(b); }
+    byDay[b].last = d;
+  }
+  daily.forEach(function (r) {
+    add(tot, r); add(byM[r.market] = byM[r.market] || zero(), r);
+    if (byDay[bucketOf(r.day)]) add(byDay[bucketOf(r.day)], r);
+  });
+  var x = function (a, b) { return b ? (a / b).toFixed(2) + 'x' : '–'; };
+  var when = F.meta.exported_at ? new Date(F.meta.exported_at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'unknown';
+  var html = '<div class="stack"><p class="small muted">' + (F.meta.sample
+    ? '<span class="badge warn">SAMPLE DATA</span> Invented figures for the demo. Signed in, this tab shows the real Daily Funnel Sheet. Figures run from '
+    : '<span class="badge">REAL DATA</span> From the client’s ' + esc(F.meta.source || 'Daily Funnel Sheet') + ', copied ' + esc(when) + '. Figures run from ') + (F.meta.min ? esc(fmtDay(String(F.meta.min), true)) : '–') + ' to ' + (F.meta.max ? esc(fmtDay(String(F.meta.max), true)) : '–') +
+    '. This is a copy taken on request, not a live link. Sales include VAT; net revenue excludes it.</p>';
+  if (!daily.length) {
+    $('view').innerHTML = html + '<div class="panel"><p class="muted">No funnel figures for this period' + (fm ? ' and market' : '') + '. The 3PL and collection filters do not apply to this tab.</p></div></div>';
+    return;
+  }
+  html += '<div class="kpis">' +
+    kpi('Ad spend', money(tot.spend), pct(tot.spend, tot.net) + ' of net revenue') +
+    kpi('Shopify sales', money(tot.sales), 'inc. VAT') +
+    kpi('Net revenue', money(tot.net), 'ex VAT') +
+    kpi('Contribution after ads', money(tot.con), pct(tot.con, tot.net) + ' of net revenue') +
+    kpi('Blended ROAS', x(tot.sales, tot.spend), 'sales ÷ ad spend') +
+    kpi('New-customer ROAS', x(tot.nc, tot.spend), 'new-customer sales ÷ ad spend') +
+    kpi('New-customer share', pct(tot.nc, tot.sales), 'of Shopify sales') + '</div>';
+  html += '<div class="panel"><div class="panel-head"><h3>Sales, ad spend and contribution over time</h3>' + granPicker() + '</div><div id="chFunnel"></div></div>';
+
+  var mk = Object.keys(byM).sort(function (a, b) { return byM[b].sales - byM[a].sales; });
+  html += '<div class="panel"><div class="panel-head"><h3>By market</h3><span class="small muted">select a market to filter the dashboard</span></div><div class="scroll"><table><thead><tr><th>Market</th><th>Meta</th><th>Google</th><th>AppLovin</th><th>Ad spend</th><th>Shopify sales</th><th>Net revenue</th><th>Contribution</th><th>Contr %</th><th>ROAS</th><th>New-cust ROAS</th></tr></thead><tbody>' +
+    mk.map(function (m) {
+      var r = byM[m];
+      return '<tr class="click' + (fm === m ? ' sel' : '') + '" data-filter="m|' + esc(m) + '" tabindex="0"><td>' + esc(nameOf('markets', m)) + '</td><td>' + money(r.meta) + '</td><td>' + money(r.google) + '</td><td>' + money(r.app) +
+        '</td><td>' + money(r.spend) + '</td><td>' + money(r.sales) + '</td><td>' + money(r.net) + '</td><td>' + money(r.con) + '</td><td class="pct">' + pct(r.con, r.net) + '</td><td>' + x(r.sales, r.spend) + '</td><td>' + x(r.nc, r.spend) + '</td></tr>';
+    }).join('') + '</tbody></table></div></div>';
+
+  var cat = {};
+  F.category.forEach(function (r) {
+    if (fm && r.market !== fm) return;
+    var k = r.market + '|' + r.category, o = cat[k] = cat[k] || { market: r.market, category: r.category, spend: 0, nw: 0, ret: 0 };
+    o.spend += N(r.meta_spend) + N(r.google_spend) + N(r.applovin_spend); o.nw += N(r.new_sales); o.ret += N(r.returning_sales);
+  });
+  var cats = Object.keys(cat).map(function (k) { return cat[k]; }).sort(function (a, b) { return (b.nw + b.ret) - (a.nw + a.ret); });
+  var catSpend = cats.reduce(function (s, c) { return s + c.spend; }, 0);
+  html += '<div class="grid g2"><div class="panel"><div class="panel-head"><h3>Bags vs glasses cases</h3><span class="small muted">ad spend matched to a product category</span></div>' + (cats.length
+    ? '<div class="scroll"><table><thead><tr><th>Market</th><th class="l">Category</th><th>Ad spend</th><th>New-cust sales</th><th>Returning sales</th><th>ROAS</th></tr></thead><tbody>' +
+      cats.map(function (c) {
+        return '<tr><td>' + esc(c.market) + '</td><td class="l">' + esc(c.category) + '</td><td>' + money(c.spend) + '</td><td>' + money(c.nw) + '</td><td>' + money(c.ret) + '</td><td>' + x(c.nw + c.ret, c.spend) + '</td></tr>';
+      }).join('') + '</tbody></table></div><p class="note">Spend matched to a category here is ' + money(catSpend) + ' of ' + money(tot.spend) + ' total ad spend (' + pct(catSpend, tot.spend) +
+      '). The rest is not tied to bags or glasses cases in the sheet.</p>'
+    : '<p class="muted">No category figures for this period (they start later than the market figures).</p>') + '</div>';
+
+  var costs = {}, months = {}, sheetTotal = 0, usd = 0;
+  F.costs.forEach(function (c) {
+    if (c.month > state.to || monthEnd(c.month) < state.from) return;
+    months[c.month] = 1;
+    if (c.is_total) { sheetTotal += N(c.amount); return; }
+    if (c.currency === 'USD') { usd += N(c.amount); return; }
+    costs[c.item] = (costs[c.item] || 0) + N(c.amount);
+  });
+  var items = Object.keys(costs).sort(function (a, b) { return costs[b] - costs[a]; });
+  html += '<div class="panel"><div class="panel-head"><h3>App and software costs</h3><span class="small muted">whole months touching this period</span></div>' + (items.length || sheetTotal
+    ? '<div class="scroll"><table><thead><tr><th>Item</th><th>Amount</th></tr></thead><tbody>' +
+      items.slice(0, 14).map(function (i) { return '<tr><td>' + esc(i) + '</td><td>' + money2(costs[i]) + '</td></tr>'; }).join('') +
+      (items.length > 14 ? '<tr><td class="muted">' + (items.length - 14) + ' smaller items</td><td>' + money2(items.slice(14).reduce(function (s, i) { return s + costs[i]; }, 0)) + '</td></tr>' : '') +
+      (sheetTotal ? '<tr class="total"><td>Sheet’s own total</td><td>' + money2(sheetTotal) + '</td></tr>' : '') + '</tbody></table></div>' +
+      '<p class="note">These are app and software costs only, not all overheads.' + (usd ? ' Items billed in dollars ($' + num(usd) + ') are not in the list above; the sheet’s total converts them.' : '') +
+      ' Months covered: ' + Object.keys(months).length + '.</p>'
+    : '<p class="muted">The sheet has no app costs entered for this period.</p>') + '</div></div></div>';
+  $('view').innerHTML = html;
+
+  var s = keys.map(function (k) {
+    var o = byDay[k];
+    o.label = state.gran === 'month' ? new Date(ms(k)).toLocaleDateString('en-GB', { month: 'short', year: '2-digit', timeZone: 'UTC' }) : fmtDay(k);
+    o.tip = state.gran === 'day' ? fmtDay(k, true) : state.gran === 'week' ? fmtDay(o.first) + ' to ' + fmtDay(o.last, true) : o.label;
+    return o;
+  });
+  drawChart('chFunnel', s, [
+    { name: 'Shopify sales', type: 'bar', color: '--c-rev', values: s.map(function (o) { return o.sales; }) },
+    { name: 'Ad spend', type: 'line', color: '--c-mkt', values: s.map(function (o) { return o.spend; }) },
+    { name: 'Contribution after ads', type: 'line', color: '--c-gp', values: s.map(function (o) { return o.con; }) }
+  ], money);
+}
+
 function renderOrders() {
   var o = state.ord, body;
   var head = function (col, label, cls) {
@@ -729,6 +869,7 @@ function render() {
   renderFilters();
   state.charts = {};
   if (state.tab === 'overview') renderOverview();
+  else if (state.tab === 'funnel') renderFunnel();
   else if (state.tab === 'markets') renderDim('m', 'by market', 'markets');
   else if (state.tab === 'threepl') renderDim('t', 'by 3PL', 'threepls');
   else if (state.tab === 'collections') renderDim('c', 'by collection', null);
@@ -780,6 +921,7 @@ function load() {
     setStatus(d.facts.length ? '' : 'No orders in this period.');
     render();
     provider.sync().then(function (s) { state.sync = s || []; if (state.tab === 'notes') render(); });
+    provider.funnel(state.from, state.to).then(function (f) { state.funnel = f; if (state.tab === 'funnel') render(); });
     return loadOrders();
   }).catch(function (e) {
     setStatus('Could not load the data: ' + e.message + '. If you are signed in but see this, your email may not be on the allowed list.');
