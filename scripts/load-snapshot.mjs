@@ -13,10 +13,15 @@ import { dirname, join } from "node:path";
 
 const input = process.argv[2];
 if (!input) { console.error('Usage: node scripts/load-snapshot.mjs "<path to export.json>"'); process.exit(1); }
-const data = JSON.parse(readFileSync(input, "utf8"));
-const slug = data.sheet.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
-const out = join(dirname(fileURLToPath(import.meta.url)), "..", "supabase", "seeds", "10_private_snap_" + slug + ".sql");
+const parsed = JSON.parse(readFileSync(input, "utf8"));
+// A file may hold one sheet, or several as { sheets: [ ... ] }. Each sheet gets its own seed file.
+const all = Array.isArray(parsed.sheets) ? parsed.sheets : [parsed];
+const seedDir = join(dirname(fileURLToPath(import.meta.url)), "..", "supabase", "seeds");
 const MAX_ROWS = 5000, MAX_COLS = 60;
+for (const data of all) {
+if (!data.tabs || !Object.keys(data.tabs).length) { console.log("Skipped \"" + data.sheet + "\": nothing was copied from it."); continue; }
+const slug = data.sheet.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60);
+const out = join(seedDir, "10_private_snap_" + slug + ".sql");
 
 const q = (s) => "'" + String(s).replace(/'/g, "''") + "'";
 
@@ -43,7 +48,8 @@ const sql = ["-- PRIVATE: a copy of the client's sheet \"" + data.sheet.replace(
 const report = [];
 let position = 0;
 for (const [tab, csv] of Object.entries(data.tabs)) {
-  let rows = parseCsv(csv).map((r) => { let n = r.length; while (n && r[n - 1] === "") n--; return r.slice(0, Math.min(n, MAX_COLS)); });
+  // A tab is normally CSV text; it may also be given directly as rows of cells.
+  let rows = (Array.isArray(csv) ? csv.map((r) => r.map((c) => (c == null ? "" : String(c)))) : parseCsv(csv)).map((r) => { let n = r.length; while (n && r[n - 1] === "") n--; return r.slice(0, Math.min(n, MAX_COLS)); });
   while (rows.length && !rows[rows.length - 1].length) rows.pop();
   const truncated = rows.length > MAX_ROWS;
   if (truncated) rows = rows.slice(0, MAX_ROWS);
@@ -61,4 +67,5 @@ for (const [tab, csv] of Object.entries(data.tabs)) {
 }
 sql.push("commit;", "");
 writeFileSync(out, sql.join("\n"), "utf8");
-console.log("Wrote the private seed file for \"" + data.sheet + "\":\n  " + report.join("\n  "));
+console.log("\"" + data.sheet + "\": " + report.length + " tabs, " + sql.join("\n").length + " characters of seed");
+}
