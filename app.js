@@ -52,6 +52,12 @@ var TABS = [
   ['overview', 'Overview'], ['funnel', 'Marketing funnel'], ['sheets', 'Sheets'], ['markets', 'By market'], ['threepl', 'By 3PL'], ['collections', 'By collection'],
   ['orders', 'Orders'], ['costs', 'Costs'], ['marketing', 'Marketing & OPEX'], ['notes', 'Data notes']
 ];
+/* These tabs still run on invented order data. Signed-in users do not see them until real
+   order-level data is loaded; they stay in the demo so the layout can be shown. */
+var SAMPLE_TABS = { overview: 1, markets: 1, threepl: 1, collections: 1, orders: 1, costs: 1, marketing: 1 };
+function visibleTabs() {
+  return state.mode === 'live' ? TABS.filter(function (t) { return !SAMPLE_TABS[t[0]]; }) : TABS;
+}
 var PRESETS = [
   ['week', 'This week'], ['4w', 'Last 4 weeks'], ['month', 'This month'],
   ['lastmonth', 'Last month'], ['90d', 'Last 90 days'], ['ytd', 'Year to date']
@@ -868,7 +874,9 @@ function renderNotes() {
   var cur = period(state.from, state.to), m = state.data.meta;
   $('view').innerHTML = '<div class="stack"><div class="panel prose">' +
     '<h3>What you are looking at</h3>' +
-    (m.sample ? '<p><span class="badge warn">SAMPLE DATA</span> Every number on this dashboard is invented so the layout can be checked. Nothing here comes from the client’s systems yet.</p>' : '') +
+    (state.mode === 'live'
+      ? '<p><span class="badge">REAL DATA</span> The Marketing funnel and Sheets tabs show copies of the client’s own sheets. The order-level P&amp;L tabs (Overview, By market, Orders and so on) are hidden for now: they need real order and invoice data, which has not been loaded yet. They can still be seen, on invented numbers, in the demo.</p>'
+      : '<p><span class="badge warn">SAMPLE DATA</span> Every number in this demo is invented so the layout can be shown. Nothing here comes from the client’s systems.</p>') +
     '<p>Data covers ' + (m.min ? esc(fmtDay(String(m.min), true)) + ' to ' + esc(fmtDay(String(m.max), true)) : 'no dates yet') + '.</p>' +
     '<h3>Live sheets</h3>' + (state.sync.length
       ? '<div class="scroll"><table><thead><tr><th>Sheet</th><th class="l">Tab</th><th>Rows</th><th class="l">Last synced</th><th class="l">Status</th></tr></thead><tbody>' +
@@ -925,10 +933,11 @@ function renderFilters() {
       : state.f.m ? '<span class="small muted">Filtered view: OPEX is shared out by net revenue.</span>' : '');
 }
 function render() {
-  var title = TABS.filter(function (t) { return t[0] === state.tab; })[0] || TABS[0];
+  var shown = visibleTabs();
+  var title = shown.filter(function (t) { return t[0] === state.tab; })[0] || shown[0];
   state.tab = title[0];
   $('tabTitle').textContent = title[1];
-  $('tabs').innerHTML = TABS.map(function (t) {
+  $('tabs').innerHTML = shown.map(function (t) {
     return '<a href="#' + t[0] + '" class="' + (t[0] === state.tab ? 'on' : '') + '"' + (t[0] === state.tab ? ' aria-current="page"' : '') + '>' + t[1] + '</a>';
   }).join('');
   $('presets').innerHTML = PRESETS.map(function (p) {
@@ -938,7 +947,10 @@ function render() {
   var pr = prevRange(), len = daysBetween(state.from, state.to);
   $('rangeNote').textContent = len + (len === 1 ? ' day' : ' days') + ', compared with ' + fmtDay(pr.from) + ' to ' + fmtDay(pr.to, true);
   if (!state.data) return;
-  $('sampleBadge').hidden = !state.data.meta.sample;
+  /* The header badge belongs only to the tabs that really are on sample data. */
+  $('sampleBadge').hidden = !(state.data.meta.sample && SAMPLE_TABS[state.tab]);
+  var plain = state.tab === 'sheets' || state.tab === 'notes';   // no dates or filters on these tabs
+  document.querySelector('.range').hidden = plain; $('filters').hidden = plain;
   $('demoBadge').hidden = state.mode !== 'demo';
   renderFilters();
   state.charts = {};
@@ -1010,7 +1022,7 @@ function start(p, who, mode) {
   $('signin').hidden = true; $('app').hidden = false;
   $('who').textContent = who;
   $('signOut').textContent = mode === 'demo' ? 'Leave demo' : 'Sign out';
-  state.tab = (location.hash || '#overview').slice(1);
+  state.tab = (location.hash || (mode === 'live' ? '#sheets' : '#overview')).slice(1);
   applyPreset(state.preset || '4w');
   load();
 }
