@@ -3,11 +3,12 @@ import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 
-// The React version of the dashboard. It is built into ../next and served by GitHub Pages
-// at /pl-planner/next/, beside the original dashboard, until it replaces it.
+// The dashboard. It builds into web/dist with relative addresses, so the same build works
+// wherever it is served from. scripts/build-web.mjs runs the build and copies the result
+// to the project root, which GitHub Pages serves at /pl-planner/.
 export default defineConfig({
-  base: '/pl-planner/next/',
+  base: './',
   plugins: [react(), tailwindcss()],
   resolve: { alias: { '@': path.resolve(import.meta.dirname, './src') } },
-  build: { outDir: '../next', emptyOutDir: true, chunkSizeWarningLimit: 2500 },
+  build: { outDir: 'dist', emptyOutDir: true, chunkSizeWarningLimit: 2500 },
 })

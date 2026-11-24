@@ -8,8 +8,10 @@ Order-by-order profit and loss in one place: revenue after tax, COGS, pick & pac
 
 | File | What it is |
 |---|---|
-| `index.html`, `styles.css`, `app.js` | The dashboard: one web page with a sign-in screen and eight tabs |
-| `config.js` | Address and public key of the Sofia & Spiritz Supabase project (the public key is safe to share; the secret key never goes in this folder) |
+| `web/` | The dashboard's source (React, shadcn/ui, Evil Charts). Change it here, then run `node scripts/build-web.mjs` |
+| `index.html`, `assets/` | The built dashboard that GitHub Pages serves. Made by the build, not edited by hand |
+| `classic/` | The earlier plain-HTML dashboard, kept at `/pl-planner/classic/`. Its `config.js` holds the address and public key of the Sofia & Spiritz Supabase project (the public key is safe to share; the secret key never goes in this folder) |
+| `next/` | A redirect only. It was the preview address of the React dashboard before it became the main one |
 | `supabase/migrations/` | Database changes, in order. The first one creates the tables, the security rules and the reporting function |
 | `supabase/seeds/01_sample_data.sql` | Fills the tables with about 180 days of invented orders |
 | `supabase/seeds/00_private_users.sql` | The emails allowed to see the data. Kept on the PC only, never committed |

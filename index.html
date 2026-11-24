@@ -1,72 +1,14 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex, nofollow">
-<title>P&amp;L Planner</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
-<link rel="stylesheet" href="styles.css">
-<script>
-  /* Apply the saved light/dark choice before the page paints. Light is the default. */
-  try { if (localStorage.getItem('pl-theme') === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); } catch (e) {}
-</script>
-</head>
-<body>
-
-<!-- Sign-in screen -->
-<div id="signin" class="signin" hidden>
-  <form id="signinForm" class="signin-card" autocomplete="on">
-    <p class="eyebrow">Sofia &amp; Spiritz</p>
-    <h1>P&amp;L Planner</h1>
-    <p class="muted">Order-by-order profit and loss, one set of numbers.</p>
-    <label>Email <input id="siEmail" type="email" autocomplete="username" required></label>
-    <label>Password <input id="siPass" type="password" autocomplete="current-password" required></label>
-    <button class="btn primary" type="submit">Sign in</button>
-    <p id="siMsg" class="msg" role="status"></p>
-    <hr>
-    <button class="btn" type="button" id="demoBtn">Open the demo with sample data</button>
-    <p class="muted small">The demo uses invented numbers made in your browser. It reads nothing from the database.</p>
-  </form>
-</div>
-
-<!-- App -->
-<div id="app" class="app" hidden>
-  <aside class="nav">
-    <div class="brand"><div>P&amp;L Planner<span>Sofia &amp; Spiritz</span></div></div>
-    <nav id="tabs"></nav>
-    <div class="nav-foot">
-      <div id="who" class="small muted"></div>
-      <div class="row">
-        <button class="btn small" id="themeBtn" type="button">Dark mode</button>
-        <button class="btn small" id="signOut" type="button">Sign out</button>
-      </div>
-    </div>
-  </aside>
-  <main>
-    <header class="top">
-      <div class="top-row">
-        <h2 id="tabTitle"></h2>
-        <span id="sampleBadge" class="badge warn" hidden>SAMPLE DATA, not real numbers</span>
-        <span id="demoBadge" class="badge" hidden>Demo mode</span>
-      </div>
-      <div class="range">
-        <div id="presets" class="seg"></div>
-        <label>From <input type="date" id="from"></label>
-        <label>To <input type="date" id="to"></label>
-        <span id="rangeNote" class="small muted"></span>
-      </div>
-      <div id="filters" class="range"></div>
-    </header>
-    <div id="status" class="msg" role="status"></div>
-    <div id="view"></div>
-  </main>
-</div>
-
-<script src="config.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
-<script src="app.js"></script>
-</body>
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>P&amp;L Planner</title><meta name="robots" content="noindex, nofollow">
+    <script type="module" crossorigin src="./assets/index-Cp_Afkbm.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-Bb-JW0wz.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
 </html>
