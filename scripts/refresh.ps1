@@ -31,7 +31,14 @@ if (Test-Path $funnel) { node scripts/load-funnel.mjs $funnel; if ($LASTEXITCODE
 node scripts/load-snapshot.mjs $all | Select-Object -Last 3
 if ($LASTEXITCODE -ne 0) { Write-Host 'Sheet loader failed.'; exit 1 }
 
-$push = npx --yes supabase db push --remote --include-seed --yes 2>&1 | Out-String
-if ($LASTEXITCODE -ne 0) { Write-Host 'Supabase push failed:'; Write-Host $push.Substring([Math]::Max(0, $push.Length - 500)); exit 1 }
-$n = ([regex]::Matches($push, 'Seeding data from')).Count
+# The database connection sometimes drops partway. A rerun carries on where it stopped,
+# so try up to five times before giving up.
+$n = 0; $ok = $false; $push = ''
+foreach ($try in 1..5) {
+  $push = npx --yes supabase db push --remote --include-seed --yes 2>&1 | Out-String
+  $n += ([regex]::Matches($push, 'Seeding data from')).Count
+  if ($LASTEXITCODE -eq 0 -and $push -notmatch '"_tag":"Error"') { $ok = $true; break }
+  Start-Sleep -Seconds 10
+}
+if (-not $ok) { Write-Host 'Supabase push failed after 5 tries:'; Write-Host $push.Substring([Math]::Max(0, $push.Length - 500)); exit 1 }
 Write-Host "Loaded. Sheets or tables that had changed and were refreshed: $n. Finished $(Get-Date -Format 'HH:mm')."
