@@ -24,8 +24,21 @@ export type Funnel = {
 export type SnapTab = { id: number; sheet: string; tab: string; copied_at: string | null; rows: number; cols: number }
 export type SyncRow = { name: string; tab: string; enabled: boolean; rows: number; last_ok: string | null; last_status: string | null; last_message: string | null }
 
+// One SKU in one market for the period. Revenue is actual; every cost is an estimate.
+export type SkuRow = {
+  market: string; three_pl: string; sku: string; title: string; collection: string; is_gift: boolean
+  units: number; gross_sales: number; discounts: number; net_sales: number; shipping_income: number
+  product_cost: number; duty_freight: number; pick_pack: number; postage: number; payment_fees: number; ad_spend: number
+}
+export type SkuPl = {
+  period: { from: string; to: string; built_at?: string | null; notes?: Record<string, string>; sample?: boolean } | null
+  periods: { from: string; to: string }[]
+  rows: SkuRow[]
+}
+
 export type Provider = {
   mode: 'live' | 'demo'
+  skuPl(): Promise<SkuPl | null>
   funnel(from: string, to: string): Promise<Funnel | null>
   snapList(): Promise<SnapTab[]>
   snapTab(id: number): Promise<string[][]>
@@ -34,6 +47,10 @@ export type Provider = {
 
 export const live: Provider = {
   mode: 'live',
+  async skuPl() {
+    const { data, error } = await sb.rpc('sku_pl_data')
+    return error ? null : data
+  },
   async funnel(from, to) {
     const { data, error } = await sb.rpc('funnel_data', { p_from: from, p_to: to })
     return error ? null : data
@@ -92,8 +109,31 @@ export function demo(): Provider {
     costs.push({ month: mo, item: 'TOTAL', amount: 2100, currency: 'GBP', is_total: true })
   }
   const names = ['Order 2 - Sample supplier', 'Order 10 - Sample supplier', 'Sample stock check', 'Sample supplier tracker', 'Sample forecast', 'Sample shipping rates', 'Sample P&L by location']
+  // Invented SKUs for the demo: made-up names, prices and costs.
+  const skuRows: SkuRow[] = []
+  const cat: [string, string, string, number, number, number][] = [   // collection, code, name, price, unit cost, weekly units
+    ['Bags', 'BAG', 'Sample crossbody bag', 82, 15, 420], ['Glasses cases', 'GLS', 'Sample glasses case', 21, 2.6, 900],
+    ['Straps', 'STP', 'Sample strap', 0.3, 1.5, 700], ['Card holders', 'CRD', 'Sample card holder', 1.1, 2.2, 90],
+  ]
+  const colours = ['Black', 'Stone', 'Navy', 'Green', 'Tan']
+  for (const [collection, code, name, price, cost, vol] of cat) colours.forEach((colour, ci) => {
+    for (const [m, share, pl, post] of [['UK', 0.36, 'Sample UK warehouse', 2.6], ['US', 0.5, 'Sample overseas warehouse', 8.2], ['AU', 0.14, 'Sample overseas warehouse', 8.2]] as [string, number, string, number][]) {
+      const units = Math.round(vol * share * (1.5 - ci * 0.22) * (0.8 + 0.4 * rnd()))
+      const net = r2(units * price * (0.9 + 0.2 * rnd())), paid = collection === 'Bags' || collection === 'Glasses cases'
+      skuRows.push({ market: m, three_pl: pl, sku: `${code}/9${String(ci + 1).padStart(2, '0')}`, title: `${name} – ${colour}`, collection, is_gift: false, units,
+        gross_sales: r2(net * 1.4), discounts: r2(-net * 0.4), net_sales: net, shipping_income: r2(paid ? units * 1.2 : 0), product_cost: r2(units * cost),
+        duty_freight: r2(units * cost * (m === 'US' ? 0.4 : 0.02)), pick_pack: r2(paid ? units * 0.5 : 0), postage: r2(paid ? units * post * 0.45 : 0),
+        payment_fees: r2(net * 0.045), ad_spend: r2(net * 0.3 * (0.85 + 0.3 * rnd())) })
+    }
+  })
+  const skuEnd = addDays(today(), -((new Date(ms(today())).getUTCDay() + 6) % 7) - 1), skuStart = addDays(skuEnd, -6)
   return {
     mode: 'demo',
+    async skuPl() {
+      return { period: { from: skuStart, to: skuEnd, built_at: null, sample: true, notes: {
+        revenue: 'Invented for the demo.', product_cost: 'Invented for the demo.', ad_spend: 'Invented for the demo.' } },
+        periods: [{ from: skuStart, to: skuEnd }], rows: skuRows }
+    },
     async funnel(from, to) {
       return { daily: daily.filter((r) => r.day >= from && r.day <= to), category: category.filter((r) => r.day >= from && r.day <= to),
         costs: costs.filter((c) => c.month <= to && monthEnd(c.month) >= from), meta: { sample: true, source: 'sample generator', exported_at: null, min: start, max: end } }

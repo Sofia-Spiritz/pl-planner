@@ -35,7 +35,8 @@ if ($LASTEXITCODE -ne 0) { Write-Host 'Sheet loader failed.'; exit 1 }
 # so try up to five times before giving up.
 $n = 0; $ok = $false; $push = ''
 foreach ($try in 1..5) {
-  $push = npx --yes supabase db push --remote --include-seed --yes 2>&1 | Out-String
+  # Pinned: a newer version of the tool failed to start on this PC (no Windows program was installed with it).
+  $push = npx --yes supabase@3.2.0 db push --remote --include-seed --yes 2>&1 | Out-String
   $n += ([regex]::Matches($push, 'Seeding data from')).Count
   if ($LASTEXITCODE -eq 0 -and $push -notmatch '"_tag":"Error"') { $ok = $true; break }
   Start-Sleep -Seconds 10

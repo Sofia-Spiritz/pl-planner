@@ -1,6 +1,6 @@
 // The app shell: sign-in or demo first, then a side menu with Sheets, Marketing funnel and Data notes.
 import { useCallback, useEffect, useState } from 'react'
-import { BookOpen, LogOut, Moon, Sheet as SheetIcon, Sun, TrendingUp } from 'lucide-react'
+import { BookOpen, LogOut, Moon, Package, Sheet as SheetIcon, Sun, TrendingUp } from 'lucide-react'
 import { Ring } from 'loading-dev'
 import { toast } from 'sonner'
 import {
@@ -16,11 +16,13 @@ import { FunnelPage } from '@/pages/Funnel'
 import { NotesPage } from '@/pages/Notes'
 import { SheetsPage } from '@/pages/Sheets'
 import { SignInPage } from '@/pages/SignIn'
+import { SkusPage } from '@/pages/Skus'
 
-type Page = 'sheets' | 'funnel' | 'notes'
+type Page = 'sheets' | 'funnel' | 'skus' | 'notes'
 const PAGES: { id: Page; label: string; icon: typeof SheetIcon }[] = [
   { id: 'sheets', label: 'Sheets', icon: SheetIcon },
   { id: 'funnel', label: 'Marketing funnel', icon: TrendingUp },
+  { id: 'skus', label: 'SKU profit', icon: Package },
   { id: 'notes', label: 'Data notes', icon: BookOpen },
 ]
 const pageFromHash = (): Page => {
@@ -111,7 +113,7 @@ export default function App() {
             </SidebarMenu>
           </SidebarFooter>
         </Sidebar>
-        <SidebarInset>
+        <SidebarInset className="min-w-0">
           <header className="sticky top-0 z-10 flex h-14 items-center gap-2 border-b bg-background/85 px-4 backdrop-blur">
             <SidebarTrigger />
             <Separator orientation="vertical" className="mx-1 h-5" />
@@ -121,6 +123,7 @@ export default function App() {
           <div className="min-w-0 p-4 md:p-6">
             {page === 'sheets' && <SheetsPage provider={provider} />}
             {page === 'funnel' && <FunnelPage provider={provider} dark={dark} />}
+            {page === 'skus' && <SkusPage provider={provider} />}
             {page === 'notes' && <NotesPage provider={provider} />}
           </div>
         </SidebarInset>
