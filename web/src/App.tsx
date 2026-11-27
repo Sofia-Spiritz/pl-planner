@@ -1,6 +1,6 @@
 // The app shell: sign-in or demo first, then a side menu with Sheets, Marketing funnel and Data notes.
 import { useCallback, useEffect, useState } from 'react'
-import { BookOpen, LogOut, Moon, Package, Sheet as SheetIcon, Sun, TrendingUp } from 'lucide-react'
+import { BookOpen, GitCompareArrows, LogOut, Moon, Package, Sheet as SheetIcon, Sun, TrendingUp } from 'lucide-react'
 import { Ring } from 'loading-dev'
 import { toast } from 'sonner'
 import {
@@ -14,15 +14,17 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 import { demo, live, sb, type Provider } from '@/lib/data'
 import { FunnelPage } from '@/pages/Funnel'
 import { NotesPage } from '@/pages/Notes'
+import { ReconciliationPage } from '@/pages/Reconciliation'
 import { SheetsPage } from '@/pages/Sheets'
 import { SignInPage } from '@/pages/SignIn'
 import { SkusPage } from '@/pages/Skus'
 
-type Page = 'sheets' | 'funnel' | 'skus' | 'notes'
+type Page = 'sheets' | 'funnel' | 'skus' | 'reconciliation' | 'notes'
 const PAGES: { id: Page; label: string; icon: typeof SheetIcon }[] = [
   { id: 'sheets', label: 'Sheets', icon: SheetIcon },
   { id: 'funnel', label: 'Marketing funnel', icon: TrendingUp },
   { id: 'skus', label: 'SKU profit', icon: Package },
+  { id: 'reconciliation', label: 'Reconciliation', icon: GitCompareArrows },
   { id: 'notes', label: 'Data notes', icon: BookOpen },
 ]
 const pageFromHash = (): Page => {
@@ -71,8 +73,8 @@ export default function App() {
   if (checking) body = <div className="grid min-h-svh place-items-center"><Ring size={32} /></div>
   else if (!provider) body = (
     <SignInPage
-      onSignedIn={() => { setProvider(live); go('sheets'); toast.success('Signed in') }}
-      onDemo={() => { setProvider(demo()); go('sheets') }}
+      onSignedIn={() => { setProvider(live); toast.success('Signed in') }}
+      onDemo={() => setProvider(demo())}
     />
   )
   else {
@@ -118,12 +120,13 @@ export default function App() {
             <SidebarTrigger />
             <Separator orientation="vertical" className="mx-1 h-5" />
             <h1 className="text-base font-semibold">{current.label}</h1>
-            {provider.mode === 'demo' && <Badge variant="secondary" className="ml-auto bg-amber-100 text-amber-800">Demo · sample data</Badge>}
+            {provider.mode === 'demo' && page !== 'reconciliation' && <Badge variant="secondary" className="ml-auto bg-amber-100 text-amber-800">Demo · sample data</Badge>}
           </header>
           <div className="min-w-0 p-4 md:p-6">
             {page === 'sheets' && <SheetsPage provider={provider} />}
             {page === 'funnel' && <FunnelPage provider={provider} dark={dark} />}
             {page === 'skus' && <SkusPage provider={provider} />}
+            {page === 'reconciliation' && <ReconciliationPage />}
             {page === 'notes' && <NotesPage provider={provider} />}
           </div>
         </SidebarInset>
