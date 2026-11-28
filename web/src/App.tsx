@@ -126,7 +126,7 @@ export default function App() {
             {page === 'sheets' && <SheetsPage provider={provider} />}
             {page === 'funnel' && <FunnelPage provider={provider} dark={dark} />}
             {page === 'skus' && <SkusPage provider={provider} />}
-            {page === 'reconciliation' && <ReconciliationPage />}
+            {page === 'reconciliation' && <ReconciliationPage mode={provider.mode} />}
             {page === 'notes' && <NotesPage provider={provider} />}
           </div>
         </SidebarInset>

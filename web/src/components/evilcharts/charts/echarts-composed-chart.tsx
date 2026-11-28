@@ -222,6 +222,7 @@ export interface EChartsComposedChartProps<TData extends Record<string, unknown>
   barCategoryGap?: number | string; // gap between bar categories
   defaultSelectedDataKey?: string | null; // series selected on first render
   onSelectionChange?: (key: string | null) => void; // fires when the selected series changes
+  onPointClick?: (category: string, series: string) => void;
   isLoading?: boolean; // shows the animated loading skeleton
   loadingBars?: number; // number of bars in the loading skeleton
   chartOptions?: Record<string, unknown>; // escape hatch merged over the built ECharts option
@@ -1383,6 +1384,7 @@ type LiveState = {
   handlers: {
     onBrushChange?: (range: { startIndex: number; endIndex: number }) => void;
     onSelectionChange?: (key: string | null) => void;
+    onPointClick?: (category: string, series: string) => void;
     clickableKeys: Set<string>;
     selectedDataKey: string | null;
     brushFormatLabel?: (value: string, index: number) => string;
@@ -1421,6 +1423,7 @@ export function EChartsComposedChart<TData extends Record<string, unknown>>({
   barCategoryGap,
   defaultSelectedDataKey = null,
   onSelectionChange,
+  onPointClick,
   isLoading = false,
   loadingBars = LOADING_DEFAULT_BARS,
   chartOptions,
@@ -1453,6 +1456,7 @@ export function EChartsComposedChart<TData extends Record<string, unknown>>({
     handlers: {
       onBrushChange: undefined,
       onSelectionChange,
+      onPointClick,
       clickableKeys: new Set<string>(),
       selectedDataKey: defaultSelectedDataKey,
       brushFormatLabel: undefined,
@@ -1535,6 +1539,7 @@ export function EChartsComposedChart<TData extends Record<string, unknown>>({
   live.handlers = {
     onBrushChange: brushSlot.onChange,
     onSelectionChange,
+    onPointClick,
     clickableKeys,
     selectedDataKey,
     brushFormatLabel: brushSlot.formatLabel,
@@ -1709,14 +1714,22 @@ export function EChartsComposedChart<TData extends Record<string, unknown>>({
     });
 
     chart.on("click", (params) => {
-      const { clickableKeys: clickable, seriesKeys: keys } = live.handlers;
-      const p = params as { seriesId?: string; seriesIndex?: number };
+      const { clickableKeys: clickable, seriesKeys: keys, onPointClick: openPoint } = live.handlers;
+      const p = params as { seriesId?: string; seriesIndex?: number; dataIndex?: number; event?: { offsetX?: number } };
       // Symbol clicks carry seriesId; line-polygon clicks (triggerEvent)
       // only carry seriesIndex — recover the key by position. Main series (bars
       // then lines) come first in the series array, so the index maps directly.
       const id =
         p.seriesId ?? (typeof p.seriesIndex === "number" ? keys[p.seriesIndex] : undefined);
-      if (typeof id === "string" && clickable.has(id)) toggleSelection(id);
+      if (typeof id !== "string" || !clickable.has(id)) return;
+      // Line strokes can be clicked between symbols and carry no dataIndex.
+      const x = p.event?.offsetX;
+      const axisIndex = openPoint && p.dataIndex == null && typeof x === "number"
+        ? chart.convertFromPixel({ xAxisIndex: 0 }, x) : undefined;
+      const index = p.dataIndex ?? axisIndex;
+      const category = typeof index === "number" ? live.categories[Math.round(index)] : undefined;
+      if (openPoint && category) openPoint(category, id);
+      else toggleSelection(id);
     });
 
     chart.on("datazoom", () => {

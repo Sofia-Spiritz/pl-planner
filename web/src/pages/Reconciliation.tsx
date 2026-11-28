@@ -1,64 +1,52 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { ShopifyReconciliationChart, type ShopifyDrill } from '@/components/ShopifyReconciliationChart'
+import { TradingYearHistory } from '@/components/TradingYearHistory'
 import { Input } from '@/components/ui/input'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { money2 } from '@/lib/data'
-import { compareOrders, COSTS, groupOrders, mixedBaskets, parseExport, SALES, type Dataset, type Metric, type Source } from '@/lib/reconciliation'
+import { LOCAL_YEAR_HISTORY, readReports, REPORT_FEED_ENABLED, REPORTS, sampleReports, type ReportKey } from '@/lib/reconciliation-reports'
+import { compareOrders, COSTS, groupOrders, mixedBaskets, SALES, type Dataset, type Metric } from '@/lib/reconciliation'
 
-type Import = { name: string; dataset: Dataset }
 const amount = (pence?: number) => pence === undefined ? '—' : money2(pence / 100)
+const number = new Intl.NumberFormat('en-GB')
+type Bundle = ReturnType<typeof sampleReports>
 
-function FileSource({ label, help, source, value, onChange }: {
-  label: string; help: string; source: Source; value?: Import; onChange: (result?: Import) => void
-}) {
-  const [error, setError] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [shopifyYear, setShopifyYear] = useState('2026')
-
-  async function load(file: File) {
-    setLoading(true)
-    setError('')
-    onChange(undefined)
-    try {
-      if (file.size > 30_000_000) throw new Error('Choose a CSV smaller than 30 MB.')
-      onChange({ name: file.name, dataset: parseExport(await file.text(), source, shopifyYear) })
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not read this CSV.')
-    } finally {
-      setLoading(false)
-    }
-  }
-
+function ReportTable({ name, bundle, drill }: { name: ReportKey; bundle?: Bundle; drill?: ShopifyDrill }) {
+  const { label } = REPORTS[name]
+  const columns: ReadonlyArray<readonly [string, string]> = REPORTS[name].columns
+  const report = bundle?.reports[name]
+  const [search, setSearch] = useState('')
+  const query = search.trim().toLowerCase()
+  const rows = report?.rows.filter(row => {
+    if (drill && (row.day !== drill.day || (drill.market && row.market !== drill.market) || (drill.cancelledOnly && row.status !== 'Cancelled'))) return false
+    return columns.some(([key]) => String(row[key] ?? '').toLowerCase().includes(query))
+  }) ?? []
   return (
-    <div className="space-y-2">
-      <label htmlFor={source} className="text-sm font-medium">{label}</label>
-      <Input id={source} type="file" accept=".csv,text/csv" disabled={loading} aria-describedby={source + '-help'} onChange={event => {
-        const file = event.currentTarget.files?.[0]
-        event.currentTarget.value = ''
-        if (file) void load(file)
-      }} />
-      <p id={source + '-help'} className="text-xs text-muted-foreground">{help}</p>
-      {source === 'shopify' && (
-        <label className="flex items-center gap-2 text-xs text-muted-foreground">
-          Year for dates without a year
-          <Input className="w-20" type="number" min={1900} max={9999} value={shopifyYear} disabled={loading} onChange={event => {
-            setShopifyYear(event.target.value)
-            if (value) onChange(undefined)
-            setError('')
-          }} />
-        </label>
-      )}
-      {loading && <p role="status" className="text-xs">Reading CSV…</p>}
-      {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
-      {value && (
-        <div className="flex items-center gap-2 text-xs">
-          <span className="min-w-0 break-all">{value.name} · {value.dataset.lines.length.toLocaleString()} rows · {value.dataset.from} to {value.dataset.to}</span>
-          <Button variant="ghost" size="sm" onClick={() => onChange(undefined)}>Remove</Button>
-        </div>
-      )}
-    </div>
+    <Card>
+      <CardHeader>
+        <CardTitle>{label}</CardTitle>
+        <CardDescription>{report ? 'Feed refreshed ' + new Date(report.refreshedAt).toLocaleString('en-GB', { timeZone: 'UTC' }) + ' UTC' : 'Waiting for the report feed.'}</CardDescription>
+      </CardHeader>
+      {report && <CardContent className="space-y-3">
+        {!!report.rows.length && <Input aria-label={'Search ' + label} placeholder="Search this report" value={search} onChange={event => setSearch(event.target.value)} />}
+        <Table>
+          <TableHeader><TableRow>{columns.map(([key, heading]) => <TableHead key={key}>{heading}</TableHead>)}</TableRow></TableHeader>
+          <TableBody>
+            {rows.slice(0, 100).map((row, index) => <TableRow key={index}>
+              {columns.map(([key]) => {
+                const value = row[key]
+                return <TableCell key={key} className="tabular-nums">{typeof value === 'number' ? (key === 'orders' || key === 'cancelled') ? number.format(value) : amount(value) : value ?? '—'}</TableCell>
+              })}
+            </TableRow>)}
+            {!rows.length && <TableRow><TableCell colSpan={columns.length}>No rows in this view.</TableCell></TableRow>}
+          </TableBody>
+        </Table>
+        {rows.length > 100 && <p className="text-xs text-muted-foreground">First 100 of {number.format(rows.length)} rows. Search to narrow the view.</p>}
+      </CardContent>}
+    </Card>
   )
 }
 
@@ -78,8 +66,8 @@ function Comparisons({ engine, reference, referenceLabel, options, ready }: {
   const paired = rows.filter(row => row.delta !== undefined)
   const delta = paired.length ? paired.reduce((total, row) => total + row.delta!, 0) : undefined
 
-  if (!ready) return <p className="py-4 text-muted-foreground">Load both required CSVs on Overview and select a valid date range.</p>
-  if (!metric) return <p className="py-4 text-muted-foreground">The two files have no comparable amount columns for this tab.</p>
+  if (!ready) return <p className="py-4 text-muted-foreground">Waiting for both comparison feeds for this date range.</p>
+  if (!metric) return <p className="py-4 text-muted-foreground">The feeds have no equivalent measures for this tab.</p>
 
   return (
     <div className="space-y-4">
@@ -120,40 +108,69 @@ function Comparisons({ engine, reference, referenceLabel, options, ready }: {
   )
 }
 
-export function ReconciliationPage() {
-  const [shopify, setShopify] = useState<Import>()
-  const [engine, setEngine] = useState<Import>()
-  const [evidence, setEvidence] = useState<Import>()
+export function ReconciliationPage({ mode }: { mode: 'demo' | 'live' }) {
+  const [view, setView] = useState(LOCAL_YEAR_HISTORY || (mode === 'live' && !REPORT_FEED_ENABLED) ? 'year' : 'overview')
+  const [drill, setDrill] = useState<ShopifyDrill>()
   const [from, setFrom] = useState('2026-11-16')
   const [to, setTo] = useState('2026-11-22')
+  const [refresh, setRefresh] = useState(0)
+  const [liveRead, setLiveRead] = useState<{ key: string; bundle?: Bundle; error?: string }>()
   const valid = Boolean(from && to && from <= to)
-  const shop = useMemo(() => groupOrders(shopify?.dataset, from, to), [shopify, from, to])
-  const engines = useMemo(() => groupOrders(engine?.dataset, from, to), [engine, from, to])
-  const costs = useMemo(() => groupOrders(evidence?.dataset, from, to), [evidence, from, to])
+  const key = [from, to, refresh].join('/')
+  useEffect(() => {
+    if (mode !== 'live' || !valid || !REPORT_FEED_ENABLED) return
+    const controller = new AbortController()
+    readReports(from, to, controller.signal).then(bundle => {
+      if (!controller.signal.aborted) setLiveRead({ key, bundle })
+    }).catch((error: unknown) => {
+      if (!controller.signal.aborted) setLiveRead({ key, error: error instanceof Error ? error.message : 'Could not load reports.' })
+    })
+    return () => controller.abort()
+  }, [from, to, key, mode, valid])
+  const example = useMemo(() => mode === 'demo' && valid ? sampleReports(from, to) : undefined, [mode, valid, from, to])
+  const current = liveRead?.key === key ? liveRead : undefined
+  const bundle = mode === 'demo' ? example : current?.bundle
+  const { shopify, engine, evidence } = bundle ?? {}
+  const orderDrill = drill && from <= drill.day && drill.day <= to ? drill : undefined
+  const shop = useMemo(() => groupOrders(shopify, from, to), [shopify, from, to])
+  const engines = useMemo(() => groupOrders(engine, from, to), [engine, from, to])
+  const costs = useMemo(() => groupOrders(evidence, from, to), [evidence, from, to])
   const baskets = useMemo(() => mixedBaskets(shop), [shop])
   const orderReady = valid && Boolean(shopify && engine)
   const costReady = valid && Boolean(evidence && engine)
   const matched = orderReady ? [...shop.keys()].filter(id => engines.has(id)).length : undefined
-  const shared = (reference: Import | undefined, fields: Partial<Record<Metric, string>>) =>
-    Object.fromEntries(Object.entries(fields).filter(([k]) => engine?.dataset.columns.includes(k as Metric) && reference?.dataset.columns.includes(k as Metric)))
+  const shared = (reference: Dataset | undefined, fields: Partial<Record<Metric, string>>) =>
+    Object.fromEntries(Object.entries(fields).filter(([k]) => engine?.columns.includes(k as Metric) && reference?.columns.includes(k as Metric)))
 
   return (
     <div className="mx-auto max-w-7xl space-y-4">
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <p className="text-sm text-muted-foreground">Compare source exports in this browser. Imported files are cleared when you leave Reconciliation.</p>
+      {view !== 'year' && <div className="flex flex-wrap items-end justify-between gap-4">
+        <p className="text-sm text-muted-foreground">{mode === 'demo' ? 'Sample reports · invented figures' : 'Shopify and engine reconciliation feeds'}</p>
         <div className="flex flex-wrap gap-3">
           <label className="grid gap-1 text-xs font-medium">From<Input type="date" value={from} onChange={e => setFrom(e.target.value)} /></label>
           <label className="grid gap-1 text-xs font-medium">Through<Input type="date" value={to} onChange={e => setTo(e.target.value)} /></label>
+          {mode === 'live' && REPORT_FEED_ENABLED && <Button className="self-end" variant="outline" size="sm" disabled={!valid || !current} onClick={() => setRefresh(value => value + 1)}>Refresh</Button>}
         </div>
-      </div>
-      {!valid && <p role="alert" className="text-sm text-destructive">Choose a start and end day in chronological order.</p>}
-      <Tabs defaultValue="overview" className="space-y-3">
+      </div>}
+      {view !== 'year' && !valid && <p role="alert" className="text-sm text-destructive">Choose a start and end day in chronological order.</p>}
+      {view !== 'year' && mode === 'demo' && valid && !bundle?.reports.shopifyDaily?.rows.length && (
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <p role="status" className="text-muted-foreground">The demo contains orders on 18–19 November 2026.</p>
+          <Button variant="outline" size="sm" onClick={() => { setFrom('2026-11-16'); setTo('2026-11-22') }}>Show demo week</Button>
+        </div>
+      )}
+      {view !== 'year' && mode === 'live' && !REPORT_FEED_ENABLED && <p role="status" className="text-sm text-muted-foreground">Automatic feeds are pending configuration.</p>}
+      {view !== 'year' && mode === 'live' && REPORT_FEED_ENABLED && valid && !current && <p role="status" className="text-sm">Loading reports…</p>}
+      {view !== 'year' && current?.error && <p role="alert" className="text-sm text-destructive">{current.error}</p>}
+      <Tabs value={view} onValueChange={value => setView(value as string)} className="space-y-3">
         <TabsList className="max-w-full justify-start overflow-x-auto" aria-label="Reconciliation views">
           <TabsTrigger value="overview">Overview</TabsTrigger>
+          <TabsTrigger value="year">Year to date</TabsTrigger>
           <TabsTrigger value="orders">Orders</TabsTrigger>
           <TabsTrigger value="costs">Costs</TabsTrigger>
           <TabsTrigger value="attribution">Ads &amp; attribution</TabsTrigger>
         </TabsList>
+        <TabsContent value="year"><TradingYearHistory mode={mode} /></TabsContent>
         <TabsContent value="overview" className="space-y-4">
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
             {[
@@ -167,28 +184,29 @@ export function ReconciliationPage() {
               <p className="text-xl font-semibold tabular-nums">{value?.toLocaleString() ?? '—'}</p>
             </CardContent></Card>)}
           </div>
-          <Card>
-            <CardHeader><CardTitle>Source files</CardTitle><CardDescription>Use GBP amounts and Shopify order numbers in both exports. Dates are inclusive.</CardDescription></CardHeader>
-            <CardContent className="grid gap-5 lg:grid-cols-3">
-              <FileSource label="Shopify order-line CSV" source="shopify" value={shopify} onChange={setShopify} help="Use the existing Shopify sales report export with day and order_name." />
-              <FileSource label="Engine order CSV" source="engine" value={engine} onChange={setEngine} help="Map to day, order_id and comparable GBP amount columns." />
-              <FileSource label="Independent cost CSV" source="evidence" value={evidence} onChange={setEvidence} help="Optional. Map invoice or payment records to day, order_id and cost columns." />
-            </CardContent>
-          </Card>
-          <details className="rounded-lg border p-3 text-sm">
-            <summary className="cursor-pointer font-medium">CSV column guide</summary>
-            <p className="mt-2 text-muted-foreground">For engine and cost files, use one row per order or additive order line. Use YYYY-MM-DD dates and the same Shopify order number shown in the Shopify export. Use positive costs and signed adjustments, with empty fields for unknown amounts. Do not repeat an order-level total on every line.</p>
-            <div className="mt-2 break-all font-mono text-xs">{Object.keys(SALES).join(', ')}</div>
-            <div className="mt-2 break-all font-mono text-xs">{Object.keys(COSTS).join(', ')}</div>
-          </details>
+          {bundle?.reports.shopifyDaily && <ShopifyReconciliationChart rows={bundle.reports.shopifyDaily.rows} onDrill={selection => { setDrill(selection); setView('orders') }} />}
+          <ReportTable name="shopifyDaily" bundle={bundle} />
+          <p className="text-xs text-muted-foreground">Shopify groups orders by creation day in UTC. Current totals and cumulative refunds are an order snapshot. Use a transaction-date report for sales or refunds booked within the period.</p>
+          {bundle?.reports.dailyPl ? <ReportTable name="dailyPl" bundle={bundle} /> : <p className="text-sm text-muted-foreground">Engine feed unavailable. Shopify coverage remains visible when its feed is ready.</p>}
         </TabsContent>
-        <TabsContent value="orders">
-          <Comparisons engine={engines} reference={shop} referenceLabel="Shopify" options={shared(shopify, SALES)} ready={orderReady} />
+        <TabsContent value="orders" className="space-y-4">
+          {orderDrill && <div className="flex flex-wrap items-center gap-3 text-sm">
+            <p role="status">Shopify orders for {orderDrill.day} · {orderDrill.market || 'All countries'}{orderDrill.cancelledOnly ? ' · Cancelled only' : ''}</p>
+            <Button size="sm" variant="outline" onClick={() => setDrill(undefined)}>Clear chart filter</Button>
+          </div>}
+          <ReportTable name="shopifyOrders" bundle={bundle} drill={orderDrill} />
+          {!orderDrill && bundle?.reports.orderProfit && <ReportTable name="orderProfit" bundle={bundle} />}
+          {!orderDrill && (engine ? <Comparisons engine={engines} reference={shop} referenceLabel="Shopify" options={shared(shopify, SALES)} ready={orderReady} /> :
+            <p className="text-sm text-muted-foreground">Engine feed unavailable. Per-order differences require both feeds.</p>)}
         </TabsContent>
-        <TabsContent value="costs">
+        <TabsContent value="costs" className="space-y-4">
+          <ReportTable name="fulfilment" bundle={bundle} />
+          <ReportTable name="paymentFees" bundle={bundle} />
           <Comparisons engine={engines} reference={costs} referenceLabel="Independent cost" options={shared(evidence, COSTS)} ready={costReady} />
         </TabsContent>
         <TabsContent value="attribution" className="space-y-3">
+          <ReportTable name="collections" bundle={bundle} />
+          <ReportTable name="paidAds" bundle={bundle} />
           <Card>
             <CardHeader>
               <CardTitle>Mixed bag and glasses-case orders</CardTitle>
@@ -201,7 +219,7 @@ export function ReconciliationPage() {
                   {baskets.map(([market, count]) => <TableRow key={market}><TableCell>{market}</TableCell><TableCell className="text-right tabular-nums">{count.toLocaleString()}</TableCell></TableRow>)}
                   {!baskets.length && <TableRow><TableCell colSpan={2}>No mixed orders found in this period.</TableCell></TableRow>}
                 </TableBody>
-              </Table> : <p className="text-muted-foreground">Load Shopify order lines and select a valid date range.</p>}
+              </Table> : <p className="text-muted-foreground">Waiting for the Shopify order-line feed.</p>}
             </CardContent>
           </Card>
           <p className="text-sm text-muted-foreground">Campaign profitability needs Meta spend by campaign and day, a campaign-to-market/category mapping, and order attribution evidence.</p>
